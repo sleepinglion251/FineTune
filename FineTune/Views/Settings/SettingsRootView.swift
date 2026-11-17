@@ -10,10 +10,11 @@ struct SettingsRootView: View {
     @Bindable var mediaKeyStatus: MediaKeyStatus
     let mediaKeyMonitor: MediaKeyMonitor
     let shortcutsRegistry: ShortcutsRegistry
+    let midiRegistry: MIDIControlRegistry
     @ObservedObject var updateManager: UpdateManager
 
     enum Section: String, Hashable, CaseIterable, Identifiable {
-        case general, audio, shortcuts, updates, about
+        case general, audio, shortcuts, midi, updates, about
         var id: Self { self }
     }
 
@@ -26,6 +27,7 @@ struct SettingsRootView: View {
                 onResetAll: {
                     audioEngine.handleSettingsReset()
                     deviceVolumeMonitor.setSystemFollowDefault()
+                    midiRegistry.reconcile()
                 }
             )
             .tabItem { Label("General", systemImage: "gearshape") }
@@ -48,6 +50,14 @@ struct SettingsRootView: View {
             )
             .tabItem { Label("Shortcuts", systemImage: "command") }
             .tag(Section.shortcuts)
+
+            MIDITab(
+                settings: settings,
+                audioEngine: audioEngine,
+                midi: midiRegistry
+            )
+            .tabItem { Label("MIDI", systemImage: "pianokeys") }
+            .tag(Section.midi)
 
             UpdatesTab(updateManager: updateManager)
                 .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
