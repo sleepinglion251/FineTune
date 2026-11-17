@@ -50,6 +50,7 @@ struct FineTuneApp: App {
     @State private var menuBarPopupController: MenuBarPopupController
     @State private var shortcutsRegistry: ShortcutsRegistry
     @State private var resolver: TargetAppResolver
+    @State private var midiRegistry: MIDIControlRegistry
     @StateObject private var updateManager = UpdateManager()
     @State private var showMenuBarExtra = true
 
@@ -70,6 +71,7 @@ struct FineTuneApp: App {
                 mediaKeyStatus: mediaKeyStatus,
                 mediaKeyMonitor: mediaKeyMonitor,
                 shortcutsRegistry: shortcutsRegistry,
+                midiRegistry: midiRegistry,
                 updateManager: updateManager
             )
         }
@@ -222,6 +224,19 @@ struct FineTuneApp: App {
         _shortcutsRegistry = State(initialValue: registry)
         _resolver = State(initialValue: resolver)
 
+        // MIDI control: listens to every CoreMIDI source and applies learned
+        // bindings to per-app and system volume/mute. Runs independently of the
+        // popup so controllers work while it's closed.
+        let midiInput = MIDIInputService()
+        let midiRegistry = MIDIControlRegistry(
+            settings: settings,
+            input: midiInput,
+            appAudio: engine,
+            systemVolume: engine.deviceVolumeMonitor as! DeviceVolumeMonitor
+        )
+        midiRegistry.reconcile()
+        _midiRegistry = State(initialValue: midiRegistry)
+
         // Pass engine to AppDelegate
         _appDelegate.wrappedValue.audioEngine = engine
 
@@ -248,8 +263,9 @@ struct FineTuneApp: App {
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
-        ) { [settings, monitor, accessibilityService, hud, coordinator] _ in
+        ) { [settings, monitor, accessibilityService, hud, coordinator, midiInput] _ in
             MainActor.assumeIsolated {
+                midiInput.stop()
                 coordinator.stop()
                 monitor.stop()
                 accessibilityService.stop()

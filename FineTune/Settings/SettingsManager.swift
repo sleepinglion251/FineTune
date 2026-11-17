@@ -50,6 +50,11 @@ nonisolated struct AppSettings: Codable, Equatable {
     // its UserDefaults; settings.json is the source of truth.
     var customShortcuts: [String: ShortcutCodable] = [:]
 
+    // MIDI Control
+    var midiControlEnabled: Bool = true            // Listen to MIDI sources and apply bindings
+    // Keyed by MIDITarget.storageKey ("system" or "app:<persistenceIdentifier>").
+    var midiMappings: [String: MIDITargetMapping] = [:]
+
     // Appearance
     var appearance: AppearancePreference = .system  // Follow system appearance, or lock light/dark
 
@@ -76,6 +81,9 @@ nonisolated struct AppSettings: Codable, Equatable {
         mediaKeyControlEnabled = try c.decodeIfPresent(Bool.self, forKey: .mediaKeyControlEnabled) ?? true
         volumeHotkeyStep = try c.decodeIfPresent(VolumeHotkeyStep.self, forKey: .volumeHotkeyStep) ?? .normal
         customShortcuts = try c.decodeIfPresent([String: ShortcutCodable].self, forKey: .customShortcuts) ?? [:]
+        midiControlEnabled = try c.decodeIfPresent(Bool.self, forKey: .midiControlEnabled) ?? true
+        // A malformed MIDI block must not take down the rest of the user's settings.
+        midiMappings = (try? c.decodeIfPresent([String: MIDITargetMapping].self, forKey: .midiMappings)) ?? [:]
         appearance = try c.decodeIfPresent(AppearancePreference.self, forKey: .appearance) ?? .system
         popupSize = try c.decodeIfPresent(MenuBarPopupSize.self, forKey: .popupSize) ?? .comfortable
     }
