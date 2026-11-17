@@ -25,7 +25,10 @@ final class HUDWindowController: MediaKeyHUDPresenting {
     private var settingsChangedObserver: NSObjectProtocol?
 
     var hideDelayOverride: Duration?
-    var frameProvider: () -> NSRect? = { NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame }
+    /// Visible frame of the screen the HUD appears on. Defaults to the screen under the
+    /// pointer — `NSScreen.main` is wrong for an agent app: with no key window of our own
+    /// it resolves to the primary display, so the HUD never followed the user to other screens.
+    var frameProvider: () -> NSRect? = { HUDWindowController.activeScreen()?.visibleFrame }
     private(set) var showCallCount: Int = 0
     private(set) var showDidUpdatePanel: Bool = false
 
@@ -393,19 +396,60 @@ final class HUDWindowController: MediaKeyHUDPresenting {
         guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return false
         }
-        guard let mainScreen = NSScreen.main else { return false }
-        let screenFrame = mainScreen.frame
+        // Check the screen the HUD would land on, not NSScreen.main: a fullscreen app on
+        // another display shouldn't suppress the HUD here, and vice versa.
+        guard let screen = Self.activeScreen(),
+              let primaryFrame = NSScreen.screens.first?.frame else { return false }
+        let targetCGFrame = Self.cgFrame(fromAppKit: screen.frame, primaryScreenFrame: primaryFrame)
         for windowInfo in windowList {
             guard let ownerPID = windowInfo[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
                   let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: Any],
                   let boundsRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
                 continue
             }
-            if boundsRect.width >= screenFrame.width && boundsRect.height >= screenFrame.height {
+            if Self.windowCoversScreen(windowBounds: boundsRect, screenCGFrame: targetCGFrame) {
                 return true
             }
         }
         return false
+    }
+
+    // MARK: - Screen selection
+
+    /// The screen under the pointer, falling back to `NSScreen.main` then the primary display.
+    static func activeScreen() -> NSScreen? {
+        let screens = NSScreen.screens
+        if let index = screenIndex(containing: NSEvent.mouseLocation, in: screens.map(\.frame)) {
+            return screens[index]
+        }
+        return NSScreen.main ?? screens.first
+    }
+
+    /// Index of the frame containing `point`, edges inclusive (the pointer can rest on the
+    /// top edge of a screen, which `CGRect.contains` would exclude).
+    nonisolated static func screenIndex(containing point: NSPoint, in frames: [NSRect]) -> Int? {
+        frames.firstIndex { frame in
+            point.x >= frame.minX && point.x <= frame.maxX
+                && point.y >= frame.minY && point.y <= frame.maxY
+        }
+    }
+
+    /// Converts an AppKit screen frame (bottom-left origin) to CGWindow coordinates
+    /// (top-left origin of the primary display).
+    nonisolated static func cgFrame(fromAppKit frame: NSRect, primaryScreenFrame: NSRect) -> CGRect {
+        CGRect(
+            x: frame.minX,
+            y: primaryScreenFrame.maxY - frame.maxY,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    /// A window counts as fullscreen on a screen when it's at least screen-sized and sits on it.
+    nonisolated static func windowCoversScreen(windowBounds: CGRect, screenCGFrame: CGRect) -> Bool {
+        windowBounds.width >= screenCGFrame.width
+            && windowBounds.height >= screenCGFrame.height
+            && screenCGFrame.contains(CGPoint(x: windowBounds.midX, y: windowBounds.midY))
     }
 
     // MARK: - Suppression-degraded detection
