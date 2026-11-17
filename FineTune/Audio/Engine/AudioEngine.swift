@@ -45,7 +45,13 @@ final class AudioEngine {
     /// Timestamp of the last auto-switch override. Used to distinguish rapid BT auto-switches
     /// (< 1s apart) from deliberate user changes (> 1s after last override).
     private var lastAutoSwitchOverrideTime: Date?
-    private var pendingCleanup: [pid_t: Task<Void, Never>] = [:]  // Grace period for stale tap cleanup
+    private var pendingCleanup: [pid_t: Task<Void, Never>] = [:]  // Delayed suspend (or legacy destroy) for idle taps
+    /// How long an app must stay idle before its tap's IO is suspended. Short enough to
+    /// stop burning CPU soon after playback stops, long enough to ride out the
+    /// isRunning flicker that accompanies device changes.
+    var idleTapSuspendDelay: Duration = .seconds(5)
+    /// Fallback when the process monitor can't report liveness: destroy idle taps after this.
+    var idleTapDestroyDelayWithoutLiveness: Duration = .seconds(30)
     private var staleCleanupTask: Task<Void, Never>?  // Debounced cleanup scheduling
     private var healthMonitorTask: Task<Void, Never>?  // Periodic tap health monitor
     private var tapRecoveryCooldownUntil: [pid_t: Date] = [:]  // Prevents tap recreation thrashing
@@ -350,6 +356,9 @@ final class AudioEngine {
         }
 
         processMonitor.onAppsChanged = { [weak self] apps in
+            // Resume before applyPersistedSettings so a returning app's tap is running
+            // again (and flagged for re-routing if needed) before routing is evaluated.
+            self?.resumeReturningTaps()
             self?.applyPersistedSettings()
             self?.scheduleStaleCleanup()
         }
@@ -1801,13 +1810,52 @@ final class AudioEngine {
         return outputUIDs.contains(defaultUID) ? defaultUID : nil
     }
 
+    /// Restarts suspended taps for apps that are playing again, and refreshes anything that
+    /// changed while they were idle (volume/mute/EQ set from the popup or MIDI, default device).
+    /// Runs synchronously on the app-list change so the gap before IO restarts stays short;
+    /// the tap keeps the app muted meanwhile, so the gap is silent rather than a full-volume blip.
+    func resumeReturningTaps() {
+        for app in apps {
+            guard let tap = taps[app.id], tap.isSuspended else { continue }
+            // PID reused by a different app: leave it for cleanupStaleTaps to destroy.
+            guard tap.app.bundleID == app.bundleID else { continue }
+
+            pendingCleanup.removeValue(forKey: app.id)?.cancel()
+
+            guard tap.resume() else {
+                logger.warning("Resume failed for \(app.name); recreating tap")
+                Task { await self.recreateTap(for: app.id) }
+                continue
+            }
+
+            let identifier = app.persistenceIdentifier
+            _ = volumeState.loadSavedVolume(for: app.id, identifier: identifier)
+            _ = volumeState.loadSavedMute(for: app.id, identifier: identifier)
+            _ = volumeState.loadSavedBoost(for: app.id, identifier: identifier)
+            applyTapOutputState(to: tap, for: app.id)
+            tap.updateEQSettings(settingsManager.getEQSettings(for: identifier))
+
+            // routeFollowsDefaultApps only moves taps of playing apps, so a default-device
+            // change while this app was idle left its tap on the old device. Un-mark it so
+            // applyPersistedSettings (which runs next) switches the existing tap.
+            if followsDefault.contains(app.id),
+               let defaultUID = deviceVolumeMonitor.defaultDeviceUID,
+               tap.currentDeviceUIDs != [defaultUID] {
+                appliedPIDs.remove(app.id)
+            }
+        }
+    }
+
+    /// Idle taps are suspended (IO stopped, tap kept) instead of destroyed, and destroyed only
+    /// once the app's process exits. Destroying on idle meant rebuilding on resume, and the
+    /// app played unprocessed at full volume until the new tap came up.
     private func cleanupStaleTaps() {
         let activePIDs = Set(apps.map { $0.id })
-        let stalePIDs = Set(taps.keys).subtracting(activePIDs)
+        let idlePIDs = Set(taps.keys).subtracting(activePIDs)
+        let liveObjects = processMonitor.liveProcessObjectIDs
 
-        // Cancel cleanup for PIDs that reappeared — but only if bundleID matches.
+        // Cancel pending work for PIDs that reappeared — but only if bundleID matches.
         // PID reuse by a different app should not rescue the old tap.
-
         for pid in activePIDs {
             guard let task = pendingCleanup[pid] else { continue }
 
@@ -1816,54 +1864,70 @@ final class AudioEngine {
 
             if let reappearedApp, let existingTap,
                reappearedApp.bundleID != existingTap.app.bundleID {
-                // PID was reused by a different app — let the old tap be destroyed
-                logger.debug("PID \(pid) reused by different app (\(reappearedApp.bundleID ?? "nil") vs \(existingTap.app.bundleID ?? "nil")), not cancelling cleanup")
+                // PID was reused by a different app — destroy the old tap now.
+                logger.debug("PID \(pid) reused by different app (\(reappearedApp.bundleID ?? "nil") vs \(existingTap.app.bundleID ?? "nil")), destroying old tap")
+                task.cancel()
+                destroyIdleTap(pid)
                 continue
             }
 
             pendingCleanup.removeValue(forKey: pid)
             task.cancel()
-            // Don't remove from appliedPIDs — the tap is still alive and the aggregate
-            // device is still running. The process just transiently stopped audio I/O
-            // during a device change (kAudioProcessPropertyIsRunning flicker).
-            // Device routing is already handled by routeFollowsDefaultApps (follows-default)
-            // or stays put (explicit routing). Re-processing would cause an unnecessary
-            // crossfade that interrupts audio.
-            logger.debug("Cancelled pending cleanup for PID \(pid) - app reappeared")
+            // Keep appliedPIDs: the tap is still alive. The process just transiently stopped
+            // audio I/O (e.g. isRunning flicker during a device change). Re-processing would
+            // cause an unnecessary crossfade that interrupts audio.
+            logger.debug("Cancelled pending idle handling for PID \(pid) - app reappeared")
         }
 
-        // Schedule cleanup for newly stale PIDs (with grace period)
-        for pid in stalePIDs {
-            guard pendingCleanup[pid] == nil else { continue }  // Already pending
+        for pid in idlePIDs {
+            guard let tap = taps[pid] else { continue }
 
-            pendingCleanup[pid] = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(30))
-                guard !Task.isCancelled else { return }
-
-                // Double-check still stale
-                let currentPIDs = Set(self.apps.map { $0.id })
-                guard !currentPIDs.contains(pid) else {
+            if let liveObjects {
+                // Process gone: nothing left to tap. Release now rather than after a timeout.
+                let processAlive = tap.app.processObjectIDs.contains { liveObjects.contains($0) }
+                if !processAlive {
+                    pendingCleanup.removeValue(forKey: pid)?.cancel()
+                    destroyIdleTap(pid)
+                    continue
+                }
+                guard !tap.isSuspended, pendingCleanup[pid] == nil else { continue }
+                pendingCleanup[pid] = Task { @MainActor in
+                    try? await Task.sleep(for: self.idleTapSuspendDelay)
+                    guard !Task.isCancelled else { return }
                     self.pendingCleanup.removeValue(forKey: pid)
-                    return
+                    // Still idle?
+                    guard !self.apps.contains(where: { $0.id == pid }), let tap = self.taps[pid] else { return }
+                    tap.suspend()
                 }
-
-                // Now safe to cleanup
-                if let tap = self.taps.removeValue(forKey: pid) {
-                    tap.invalidate()
-                    self.logger.debug("Cleaned up stale tap for PID \(pid)")
+            } else {
+                // Liveness unknown: legacy behavior — destroy after a grace period.
+                guard pendingCleanup[pid] == nil else { continue }
+                pendingCleanup[pid] = Task { @MainActor in
+                    try? await Task.sleep(for: self.idleTapDestroyDelayWithoutLiveness)
+                    guard !Task.isCancelled else { return }
+                    self.pendingCleanup.removeValue(forKey: pid)
+                    guard !self.apps.contains(where: { $0.id == pid }) else { return }
+                    self.destroyIdleTap(pid)
                 }
-                self.appDeviceRouting.removeValue(forKey: pid)
-                self.followsDefault.remove(pid)
-                self.appliedPIDs.remove(pid)  // Allow re-initialization if app resumes
-                self.pendingCleanup.removeValue(forKey: pid)
             }
         }
 
-        // Include pending PIDs in cleanup exclusion to avoid premature state cleanup
-        let pidsToKeep = activePIDs.union(Set(pendingCleanup.keys))
+        // Keep per-PID state for every tap we still hold, playing or idle.
+        let pidsToKeep = activePIDs.union(taps.keys).union(pendingCleanup.keys)
         appliedPIDs = appliedPIDs.intersection(pidsToKeep)
         followsDefault = followsDefault.intersection(pidsToKeep)
         volumeState.cleanup(keeping: pidsToKeep)
+    }
+
+    private func destroyIdleTap(_ pid: pid_t) {
+        if let tap = taps.removeValue(forKey: pid) {
+            tap.invalidate()
+            logger.debug("Destroyed tap for exited/idle PID \(pid)")
+        }
+        appDeviceRouting.removeValue(forKey: pid)
+        followsDefault.remove(pid)
+        appliedPIDs.remove(pid)  // Allow re-initialization if the app resumes
+        pendingCleanup.removeValue(forKey: pid)
     }
 
     /// Debounced stale tap cleanup — coalesces rapid app-list changes into a single cleanup pass.

@@ -14,6 +14,7 @@ private struct AppFingerprint: Hashable {
 final class AudioProcessMonitor: AudioProcessMonitoring {
     private(set) var activeApps: [AudioApp] = []
     var onAppsChanged: (([AudioApp]) -> Void)?
+    private(set) var liveProcessObjectIDs: Set<AudioObjectID>? = nil
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "FineTune", category: "AudioProcessMonitor")
 
@@ -275,7 +276,12 @@ final class AudioProcessMonitor: AudioProcessMonitoring {
             let newSet = Set(sorted.map { AppFingerprint(pid: $0.id, objectIDs: $0.processObjectIDs) })
 
             activeApps = sorted
-            if oldSet != newSet {
+            // Also notify when a process appears or exits without changing the playing set
+            // (e.g. a paused app quits) so the engine can release that app's idle tap.
+            let newLive = Set(processIDs)
+            let liveChanged = liveProcessObjectIDs != newLive
+            liveProcessObjectIDs = newLive
+            if oldSet != newSet || liveChanged {
                 onAppsChanged?(activeApps)
             }
 
