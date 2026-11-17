@@ -32,6 +32,13 @@ protocol ProcessTapControlling: AnyObject, Sendable {
     var tapSourceDeviceUID: String? { get }
     func refreshTapSource(_ preferredDeviceUID: String?) async throws
     func recreateForOutputRateChange() async throws
+
+    /// Idle suspension: IO stopped while the app is quiet, tap kept alive (see ProcessTapController).
+    var isSuspended: Bool { get }
+    func suspend()
+    /// - Returns: `false` if IO couldn't restart; the caller should recreate the tap.
+    @discardableResult
+    func resume() -> Bool
 }
 
 extension ProcessTapControlling {
@@ -63,4 +70,10 @@ extension ProcessTapControlling {
     func recreateForOutputRateChange() async throws {
         // Default no-op for mocks that don't override
     }
+
+    // Defaults for mocks that don't model suspension.
+    var isSuspended: Bool { false }
+    func suspend() {}
+    @discardableResult
+    func resume() -> Bool { true }
 }
