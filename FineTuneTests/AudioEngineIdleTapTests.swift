@@ -134,9 +134,26 @@ private final class IdleFixture {
         monitor.publish()
     }
 
-    /// Covers the 350 ms stale-cleanup debounce plus the (shortened) idle delay.
-    func settle() async throws {
-        try await Task.sleep(for: .milliseconds(600))
+    /// Waits for engine-side timers (350 ms cleanup debounce + idle delay) without assuming
+    /// how fast they fire. On a loaded CI runner other suites can hold the main actor for
+    /// seconds, so a fixed sleep raced the timers. Polls until `condition` holds or times out.
+    func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while clock.now < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return condition()
+    }
+
+    /// Plays, pauses, and waits until the engine has suspended the app's tap.
+    func playThenSuspend() async throws -> SuspendableTap {
+        play()
+        let tap = try #require(allTaps.first)
+        pause()
+        try #require(await eventually { tap.isSuspended }, "tap was never suspended")
+        return tap
     }
 }
 
@@ -151,13 +168,8 @@ struct AudioEngineIdleTapTests {
     @Test("an idle app's tap is suspended, not destroyed")
     func idleSuspends() async throws {
         let fix = IdleFixture()
-        fix.play()
-        let tap = try #require(fix.allTaps.first)
+        let tap = try await fix.playThenSuspend()
 
-        fix.pause()
-        try await fix.settle()
-
-        #expect(tap.isSuspended)
         #expect(!tap.events.contains(.invalidate))
         #expect(fix.allTaps.count == 1)
     }
@@ -165,12 +177,9 @@ struct AudioEngineIdleTapTests {
     @Test("a returning app resumes its existing tap instead of building a new one")
     func returningResumes() async throws {
         let fix = IdleFixture()
-        fix.play()
-        fix.pause()
-        try await fix.settle()
+        let tap = try await fix.playThenSuspend()
 
         fix.play()
-        let tap = try #require(fix.allTaps.first)
         #expect(!tap.isSuspended)
         #expect(tap.events.last == .resume)
         #expect(fix.allTaps.count == 1)
@@ -179,29 +188,22 @@ struct AudioEngineIdleTapTests {
     @Test("resume applies volume changed while the app was idle")
     func resumeAppliesIdleVolume() async throws {
         let fix = IdleFixture()
-        fix.play()
-        fix.pause()
-        try await fix.settle()
+        let tap = try await fix.playThenSuspend()
 
         fix.engine.setVolumeForInactive(identifier: fix.app.persistenceIdentifier, to: 0.25)
         fix.play()
 
-        let tap = try #require(fix.allTaps.first)
         #expect(tap.volume == 0.25)
     }
 
     @Test("quitting the app destroys its idle tap")
     func exitDestroys() async throws {
         let fix = IdleFixture()
-        fix.play()
-        fix.pause()
-        try await fix.settle()
+        let tap = try await fix.playThenSuspend()
 
         fix.quit()
-        try await fix.settle()
 
-        let tap = try #require(fix.allTaps.first)
-        #expect(tap.events.last == .invalidate)
+        #expect(await fix.eventually { tap.events.last == .invalidate })
     }
 
     @Test("a quick pause/resume never suspends")
@@ -211,7 +213,8 @@ struct AudioEngineIdleTapTests {
         fix.play()
         fix.pause()
         fix.play()
-        try await fix.settle()
+        // Negative check: give the cleanup debounce time to run, then confirm nothing happened.
+        try await Task.sleep(for: .milliseconds(600))
 
         let tap = try #require(fix.allTaps.first)
         #expect(!tap.events.contains(.suspend))
@@ -220,17 +223,13 @@ struct AudioEngineIdleTapTests {
     @Test("default device changed while idle: tap is moved on resume")
     func reroutesOnResume() async throws {
         let fix = IdleFixture()
-        fix.play()
-        fix.pause()
-        try await fix.settle()
+        let tap = try await fix.playThenSuspend()
 
         fix.volume.defaultDeviceID = fix.headphones.id
         fix.volume.defaultDeviceUID = fix.headphones.uid
         fix.play()
-        try await Task.sleep(for: .milliseconds(50))
 
-        let tap = try #require(fix.allTaps.first)
-        #expect(tap.currentDeviceUIDs == [fix.headphones.uid])
+        #expect(await fix.eventually { tap.currentDeviceUIDs == [fix.headphones.uid] })
         #expect(fix.allTaps.count == 1)
     }
 
@@ -239,11 +238,10 @@ struct AudioEngineIdleTapTests {
         let fix = IdleFixture()
         fix.monitor.liveProcessObjectIDs = nil
         fix.play()
-        fix.pause()
-        try await fix.settle()
-
         let tap = try #require(fix.allTaps.first)
-        #expect(tap.events.contains(.invalidate))
+        fix.pause()
+
+        #expect(await fix.eventually { tap.events.contains(.invalidate) })
         #expect(!tap.events.contains(.suspend))
     }
 }
