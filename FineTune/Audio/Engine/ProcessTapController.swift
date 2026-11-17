@@ -1572,7 +1572,12 @@ final class ProcessTapController: ProcessTapControlling {
             outputGateMultiplier = 1.0
         }
 
-        if _isMuted {
+        // Silent fast path: an armed gate (multiplier 0, primary only) means this buffer's
+        // output is silence whatever the DSP does, so skip the chain entirely. Apps that hold
+        // an output stream open while idle (e.g. remote-desktop clients) otherwise run full
+        // EQ/loudness/limiter on silence forever. Skipped DSP only drops filter tails from
+        // audio that ended ≥ silenceHold ago, and the gate's fade-in covers the resume.
+        if _isMuted || outputGateMultiplier == 0 {
             for buf in outputBuffers {
                 if let data = buf.mData { memset(data, 0, Int(buf.mDataByteSize)) }
             }
