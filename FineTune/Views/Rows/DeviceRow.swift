@@ -44,6 +44,19 @@ struct DeviceRow: View {
     let isFocused: Bool
     let iconOverrideSymbol: String?
 
+    // Per-device EQ (optional — rows without `onEQChange` show no EQ button)
+    let eqSettings: EQSettings
+    let userPresets: [UserEQPreset]
+    let isEQExpanded: Bool
+    let onEQToggle: (() -> Void)?
+    let onEQChange: ((EQSettings) -> Void)?
+    let onUserPresetSelected: (UserEQPreset) -> Void
+    let onSavePreset: (String, EQSettings) -> Void
+    let onDeleteUserPreset: (UUID) -> Void
+    let onRenameUserPreset: (UUID, String) -> Void
+
+    @State private var localEQSettings: EQSettings
+
     @State private var sliderValue: Double
     @State private var isEditing = false
     @State private var suppressSliderAutoUnmute = false
@@ -94,8 +107,27 @@ struct DeviceRow: View {
         autoEQPreampEnabled: Bool = true,
         onAutoEQPreampToggle: (() -> Void)? = nil,
         isFocused: Bool = false,
-        iconOverrideSymbol: String? = nil
+        iconOverrideSymbol: String? = nil,
+        eqSettings: EQSettings = .flat,
+        userPresets: [UserEQPreset] = [],
+        isEQExpanded: Bool = false,
+        onEQToggle: (() -> Void)? = nil,
+        onEQChange: ((EQSettings) -> Void)? = nil,
+        onUserPresetSelected: @escaping (UserEQPreset) -> Void = { _ in },
+        onSavePreset: @escaping (String, EQSettings) -> Void = { _, _ in },
+        onDeleteUserPreset: @escaping (UUID) -> Void = { _ in },
+        onRenameUserPreset: @escaping (UUID, String) -> Void = { _, _ in }
     ) {
+        self.eqSettings = eqSettings
+        self.userPresets = userPresets
+        self.isEQExpanded = isEQExpanded
+        self.onEQToggle = onEQToggle
+        self.onEQChange = onEQChange
+        self.onUserPresetSelected = onUserPresetSelected
+        self.onSavePreset = onSavePreset
+        self.onDeleteUserPreset = onDeleteUserPreset
+        self.onRenameUserPreset = onRenameUserPreset
+        self._localEQSettings = State(initialValue: eqSettings)
         self.device = device
         self.isDefault = isDefault
         self.volume = volume
@@ -121,20 +153,53 @@ struct DeviceRow: View {
         self._sliderValue = State(initialValue: Self.volumeToSlider(volume, backend: volumeBackend))
     }
 
+    /// A non-flat, enabled device EQ tints the closed EQ button.
+    private var isDeviceEQActive: Bool {
+        eqSettings.isEnabled && eqSettings.bandGains.contains { $0 != 0 }
+    }
+
     var body: some View {
-        deviceHeader
-            .contentShape(Rectangle())
-            .onTapGesture {
-                // Whole-row tap sets this device as default. Inner controls
-                // (volume slider, mute button, AutoEQ picker, percent field)
-                // are Button/Slider/TextField subviews that capture their
-                // own gestures, so they do not propagate to this handler.
-                // Mirrors the macOS Sound submenu pattern.
-                if !isDefault {
-                    onSetDefault()
+        VStack(spacing: 0) {
+            deviceHeader
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Whole-row tap sets this device as default. Inner controls
+                    // (volume slider, mute button, AutoEQ picker, percent field,
+                    // EQ button) are Button/Slider/TextField subviews that capture
+                    // their own gestures, so they do not propagate to this handler.
+                    // Mirrors the macOS Sound submenu pattern.
+                    if !isDefault {
+                        onSetDefault()
+                    }
                 }
+
+            if isEQExpanded, let onEQChange {
+                EQPanelView(
+                    settings: $localEQSettings,
+                    userPresets: userPresets,
+                    onPresetSelected: { preset in
+                        localEQSettings = preset.settings
+                        onEQChange(preset.settings)
+                    },
+                    onUserPresetSelected: { userPreset in
+                        localEQSettings.bandGains = userPreset.settings.bandGains
+                        onUserPresetSelected(userPreset)
+                    },
+                    onSettingsChanged: { settings in
+                        onEQChange(settings)
+                    },
+                    onSavePreset: onSavePreset,
+                    onDeleteUserPreset: onDeleteUserPreset,
+                    onRenameUserPreset: onRenameUserPreset
+                )
+                .padding(.top, DesignTokens.Spacing.sm)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             }
-            .hoverableRow(isFocused: isFocused)
+        }
+        .hoverableRow(isFocused: isFocused || isEQExpanded)
+        .onChange(of: eqSettings) { _, newValue in
+            localEQSettings = newValue
+        }
     }
 
     // MARK: - Device Header
@@ -240,6 +305,10 @@ struct DeviceRow: View {
                 range: 0...100,
                 isRowFocused: isFocused
             )
+
+            if let onEQToggle {
+                EQToggleButton(isExpanded: isEQExpanded, isActive: isDeviceEQActive, action: onEQToggle)
+            }
         }
         .frame(height: DesignTokens.Dimensions.rowContentHeight)
         .onChange(of: volume) { _, newValue in
