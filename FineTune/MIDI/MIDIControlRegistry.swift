@@ -1,4 +1,5 @@
 // FineTune/MIDI/MIDIControlRegistry.swift
+import AppKit
 import AudioToolbox
 import Foundation
 import os
@@ -19,10 +20,18 @@ protocol MIDIAppAudioControlling: AnyObject {
 @MainActor
 protocol MIDISystemVolumeControlling: AnyObject {
     var defaultDeviceID: AudioDeviceID { get }
+    var volumes: [AudioDeviceID: Float] { get }
     var muteStates: [AudioDeviceID: Bool] { get }
     func setVolume(for deviceID: AudioDeviceID, to volume: Float)
     func setMute(for deviceID: AudioDeviceID, to muted: Bool)
     func outputVolumeBackend(for deviceID: AudioDeviceID) -> VolumeControlTier
+}
+
+/// Shows the per-app HUD (app icon + name) when MIDI changes an app's volume or mute.
+@MainActor
+protocol MIDIAppHUDPresenting: AnyObject {
+    func showMIDIAppVolumeHUD(icon: NSImage?, title: String, sliderFraction: Double)
+    func showMIDIAppMuteHUD(icon: NSImage?, title: String, isMuted: Bool)
 }
 
 extension AudioEngine: MIDIAppAudioControlling {}
@@ -59,6 +68,22 @@ final class MIDIControlRegistry {
     @ObservationIgnored private let input: any MIDIInputProviding
     @ObservationIgnored private let appAudio: any MIDIAppAudioControlling
     @ObservationIgnored private let systemVolume: any MIDISystemVolumeControlling
+
+    /// Shows the system-volume HUD when MIDI changes system volume or mute.
+    @ObservationIgnored weak var hud: (any MediaKeyHUDPresenting)?
+    /// Display name for an output device, shown in the HUD.
+    @ObservationIgnored var deviceNameProvider: (AudioDeviceID) -> String = { _ in "" }
+    /// Shows the per-app HUD when MIDI changes an app's volume or mute.
+    @ObservationIgnored weak var appHUD: (any MIDIAppHUDPresenting)?
+    /// Icon lookup for apps that aren't running; injectable for tests.
+    @ObservationIgnored var iconProvider: (String) -> NSImage? = { bundleID in
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first?.icon {
+            return running
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+    @ObservationIgnored private var iconCache: [String: NSImage] = [:]
 
     @ObservationIgnored private var lastDDCWrite: ContinuousClock.Instant?
     @ObservationIgnored private var pendingDDCFraction: Double?
@@ -231,6 +256,8 @@ final class MIDIControlRegistry {
             } else {
                 for app in running { appAudio.setVolume(for: app, to: gain) }
             }
+            let (icon, title) = hudIdentity(identifier: identifier, running: running.first)
+            appHUD?.showMIDIAppVolumeHUD(icon: icon, title: title, sliderFraction: sliderFraction)
 
         case .systemOutput:
             let deviceID = systemVolume.defaultDeviceID
@@ -240,6 +267,12 @@ final class MIDIControlRegistry {
             } else {
                 writeSystemVolume(sliderFraction: sliderFraction, deviceID: deviceID)
             }
+            // The HUD tracks the fader immediately, even while DDC writes are throttled.
+            showSystemHUD(
+                sliderFraction: sliderFraction,
+                mute: systemVolume.muteStates[deviceID] ?? false,
+                deviceID: deviceID
+            )
         }
     }
 
@@ -256,13 +289,45 @@ final class MIDIControlRegistry {
                 let next = muted ?? !appAudio.isMuted(for: running[0])
                 for app in running { appAudio.setMute(for: app, to: next) }
             }
+            let isMuted = running.first.map { appAudio.isMuted(for: $0) }
+                ?? appAudio.getMuteForInactive(identifier: identifier)
+            let (icon, title) = hudIdentity(identifier: identifier, running: running.first)
+            appHUD?.showMIDIAppMuteHUD(icon: icon, title: title, isMuted: isMuted)
 
         case .systemOutput:
             let deviceID = systemVolume.defaultDeviceID
             guard deviceID.isValid else { return }
             let next = muted ?? !(systemVolume.muteStates[deviceID] ?? false)
             systemVolume.setMute(for: deviceID, to: next)
+            let tier = systemVolume.outputVolumeBackend(for: deviceID)
+            let gain = systemVolume.volumes[deviceID] ?? 1.0
+            showSystemHUD(
+                sliderFraction: VolumeMapping.sliderFraction(forSystemGain: gain, tier: tier),
+                mute: next,
+                deviceID: deviceID
+            )
         }
+    }
+
+    /// Running apps supply their own icon and name; otherwise fall back to what was
+    /// remembered at learn time, then to the identifier itself.
+    private func hudIdentity(identifier: String, running: AudioApp?) -> (NSImage?, String) {
+        if let running { return (running.icon, running.name) }
+        let mapping = mapping(for: .app(identifier: identifier))
+        let bundleID = mapping?.bundleID ?? identifier
+        let icon: NSImage?
+        if let cached = iconCache[bundleID] {
+            icon = cached
+        } else {
+            icon = iconProvider(bundleID)
+            if let icon { iconCache[bundleID] = icon }
+        }
+        let title = mapping?.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? identifier
+        return (icon, title)
+    }
+
+    private func showSystemHUD(sliderFraction: Double, mute: Bool, deviceID: AudioDeviceID) {
+        hud?.show(sliderFraction: sliderFraction, mute: mute, deviceName: deviceNameProvider(deviceID))
     }
 
     private func writeSystemVolume(sliderFraction: Double, deviceID: AudioDeviceID) {

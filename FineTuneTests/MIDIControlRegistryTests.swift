@@ -50,6 +50,31 @@ private final class FakeSystemVolume: MIDISystemVolumeControlling {
     func outputVolumeBackend(for deviceID: AudioDeviceID) -> VolumeControlTier { tier }
 }
 
+@MainActor
+private final class FakeHUD: MediaKeyHUDPresenting {
+    struct Shown: Equatable { let sliderFraction: Double; let mute: Bool; let deviceName: String }
+    var shown: [Shown] = []
+    func show(sliderFraction: Double, mute: Bool, deviceName: String) {
+        shown.append(Shown(sliderFraction: sliderFraction, mute: mute, deviceName: deviceName))
+    }
+    func swallowObserved() {}
+}
+
+@MainActor
+private final class FakeAppHUD: MIDIAppHUDPresenting {
+    enum Shown: Equatable {
+        case volume(title: String, hasIcon: Bool, sliderFraction: Double)
+        case mute(title: String, hasIcon: Bool, isMuted: Bool)
+    }
+    var shown: [Shown] = []
+    func showMIDIAppVolumeHUD(icon: NSImage?, title: String, sliderFraction: Double) {
+        shown.append(.volume(title: title, hasIcon: icon != nil, sliderFraction: sliderFraction))
+    }
+    func showMIDIAppMuteHUD(icon: NSImage?, title: String, isMuted: Bool) {
+        shown.append(.mute(title: title, hasIcon: icon != nil, isMuted: isMuted))
+    }
+}
+
 @Suite("MIDIControlRegistry")
 @MainActor
 struct MIDIControlRegistryTests {
@@ -57,6 +82,8 @@ struct MIDIControlRegistryTests {
     fileprivate let input = FakeMIDIInput()
     fileprivate let audio = FakeAppAudio()
     fileprivate let system = FakeSystemVolume()
+    fileprivate let hud = FakeHUD()
+    fileprivate let appHUD = FakeAppHUD()
     let registry: MIDIControlRegistry
 
     let fader = MIDIMessage.controlChange(channel: 0, controller: 7, value: 127)
@@ -67,6 +94,10 @@ struct MIDIControlRegistryTests {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         settings = SettingsManager(directory: dir)
         registry = MIDIControlRegistry(settings: settings, input: input, appAudio: audio, systemVolume: system)
+        registry.hud = hud
+        registry.deviceNameProvider = { $0 == 42 ? "Speakers" : "" }
+        registry.appHUD = appHUD
+        registry.iconProvider = { $0 == "bundle" ? NSImage() : nil }
     }
 
     private func learn(_ target: MIDITarget, _ slot: MIDIControlSlot, with message: MIDIMessage) {
@@ -229,5 +260,63 @@ struct MIDIControlRegistryTests {
         settings.appSettings.midiControlEnabled = false
         input.send(fader)
         #expect(audio.setVolumeCalls == 0)
+    }
+
+    @Test("system volume and mute from MIDI show the HUD")
+    func systemShowsHUD() {
+        system.tier = .software
+        learn(.systemOutput, .volume, with: fader)
+        learn(.systemOutput, .mute, with: button)
+
+        input.send(.controlChange(channel: 0, controller: 7, value: 64))
+        #expect(hud.shown.last == .init(sliderFraction: 64.0 / 127.0, mute: false, deviceName: "Speakers"))
+
+        input.send(button)
+        #expect(hud.shown.count == 2)
+        #expect(hud.shown.last?.mute == true)
+        #expect(hud.shown.last?.deviceName == "Speakers")
+    }
+
+    @Test("a fader burst shows the system HUD once; per-app controls use the app HUD")
+    func hudScope() {
+        audio.apps = [spotify]
+        learn(.systemOutput, .volume, with: fader)
+        input.send(
+            .controlChange(channel: 0, controller: 7, value: 10),
+            .controlChange(channel: 0, controller: 7, value: 127)
+        )
+        #expect(hud.shown.count == 1)
+        #expect(hud.shown.last?.sliderFraction == 1.0)
+
+        learn(.app(identifier: "com.spotify.client"), .volume, with: fader)
+        input.send(.controlChange(channel: 0, controller: 7, value: 30))
+        #expect(hud.shown.count == 1)
+        #expect(appHUD.shown.count == 1)
+    }
+
+    @Test("running app volume and mute show the app HUD with its name and icon")
+    func runningAppHUD() {
+        audio.apps = [spotify]
+        learn(.app(identifier: "com.spotify.client"), .volume, with: fader)
+        learn(.app(identifier: "com.spotify.client"), .mute, with: button)
+
+        input.send(.controlChange(channel: 0, controller: 7, value: 127))
+        #expect(appHUD.shown.last == .volume(title: "Spotify", hasIcon: true, sliderFraction: 1.0))
+
+        input.send(button)
+        #expect(appHUD.shown.last == .mute(title: "Spotify", hasIcon: true, isMuted: true))
+        #expect(hud.shown.isEmpty)
+    }
+
+    @Test("a non-running app's HUD uses the name and icon remembered at learn time")
+    func inactiveAppHUD() {
+        learn(.app(identifier: "com.spotify.client"), .volume, with: fader)
+        learn(.app(identifier: "com.spotify.client"), .mute, with: button)
+
+        input.send(.controlChange(channel: 0, controller: 7, value: 0))
+        #expect(appHUD.shown.last == .volume(title: "Name", hasIcon: true, sliderFraction: 0))
+
+        input.send(button)
+        #expect(appHUD.shown.last == .mute(title: "Name", hasIcon: true, isMuted: true))
     }
 }
