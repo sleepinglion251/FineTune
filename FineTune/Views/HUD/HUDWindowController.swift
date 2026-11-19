@@ -77,7 +77,7 @@ final class HUDWindowController: MediaKeyHUDPresenting {
         showCallCount += 1
         showDidUpdatePanel = false
 
-        guard !isForegroundAppFullscreen() else {
+        guard !shouldSkipForFullscreen() else {
             logger.debug("Skipping HUD show: foreground app is fullscreen")
             return
         }
@@ -183,28 +183,52 @@ final class HUDWindowController: MediaKeyHUDPresenting {
         )
     }
 
-    /// Hotkey-triggered per-app HUDs bypass the fullscreen guard because the user explicitly invoked them.
+    func showMIDIAppVolumeHUD(icon: NSImage?, title: String, sliderFraction: Double) {
+        presentPerApp(icon: icon, title: title, content: .volume(sliderFraction: max(0, min(1, sliderFraction))))
+    }
+
+    func showMIDIAppMuteHUD(icon: NSImage?, title: String, isMuted: Bool) {
+        presentPerApp(icon: icon, title: title, content: .mute(isMuted: isMuted))
+    }
+
     private func presentPerApp(icon: NSImage?, title: String, content: PerAppHUDContent) {
         showCallCount += 1
         showDidUpdatePanel = false
+
+        guard !shouldSkipForFullscreen() else {
+            logger.debug("Skipping per-app HUD: foreground app is fullscreen")
+            return
+        }
 
         guard !popupVisibility.isVisible else {
             logger.debug("Skipping per-app HUD: popup is visible")
             return
         }
 
+        let style = settingsManager.appSettings.hudStyle
         let appearance = settingsManager.appSettings.appearance
-        styleAtLastShow = .tahoe
+        styleAtLastShow = style
         let panel = ensurePanel()
         panel.appearance = appearance.nsAppearance
         panel.ignoresMouseEvents = true
 
         let scheme = appearance.swiftUIColorScheme
-        let root = AnyView(
-            PerAppHUD(icon: icon, title: title, content: content)
-                .preferredColorScheme(scheme)
-        )
-        let size = NSSize(width: 300, height: 72)
+        let root: AnyView
+        let size: NSSize
+        switch style {
+        case .tahoe:
+            root = AnyView(
+                PerAppHUD(icon: icon, title: title, content: content)
+                    .preferredColorScheme(scheme)
+            )
+            size = NSSize(width: 300, height: 72)
+        case .classic:
+            root = AnyView(
+                ClassicPerAppHUD(icon: icon, title: title, content: content)
+                    .preferredColorScheme(scheme)
+            )
+            size = NSSize(width: 200, height: 200)
+        }
 
         if let existing = hostingView {
             existing.rootView = root
@@ -217,7 +241,7 @@ final class HUDWindowController: MediaKeyHUDPresenting {
         showDidUpdatePanel = true
 
         panel.setContentSize(size)
-        panel.setFrameOrigin(position(for: .tahoe, size: size))
+        panel.setFrameOrigin(position(for: style, size: size))
 
         if panel.isVisible {
             panel.orderFrontRegardless()
@@ -232,7 +256,7 @@ final class HUDWindowController: MediaKeyHUDPresenting {
             }
         }
 
-        scheduleHide(for: .tahoe)
+        scheduleHide(for: style)
         postPerAppAccessibilityAnnouncement(panel: panel, title: title, content: content)
     }
 
@@ -388,6 +412,15 @@ final class HUDWindowController: MediaKeyHUDPresenting {
     }
 
     // MARK: - Fullscreen guard
+
+    /// Overridable for tests, which have no real window list.
+    var fullscreenDetector: (() -> Bool)?
+
+    /// Honors the "show over full-screen apps" preference for every HUD kind.
+    private func shouldSkipForFullscreen() -> Bool {
+        guard !settingsManager.appSettings.hudShowsOverFullscreen else { return false }
+        return fullscreenDetector?() ?? isForegroundAppFullscreen()
+    }
 
     private func isForegroundAppFullscreen() -> Bool {
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return false }
@@ -653,4 +686,128 @@ private struct PerAppHUD: View {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+/// Classic-style (200×200 tile) per-app HUD: app icon in place of the speaker glyph,
+/// app name, then the 16-tile row (volume) or a mute/status label.
+private struct ClassicPerAppHUD: View {
+    let icon: NSImage?
+    let title: String
+    let content: PerAppHUDContent
+
+    private static let tileCount: Int = 16
+    private static let frameSize: CGFloat = 200
+    private static let cornerRadius: CGFloat = 16
+    private static let iconSize: CGFloat = 72
+    private static let tileSize: CGFloat = 7.5
+    private static let tileSpacing: CGFloat = 2
+
+    private var displayLevel: Double {
+        switch content {
+        case .volume(let sliderFraction): return max(0, min(1, sliderFraction))
+        case .mute, .notControlled: return 0
+        }
+    }
+
+    private var isMuted: Bool {
+        switch content {
+        case .mute(let isMuted): return isMuted
+        case .volume: return Int((displayLevel * 100).rounded()) == 0
+        case .notControlled: return false
+        }
+    }
+
+    private var filledTileCount: Int {
+        Int((displayLevel * Double(Self.tileCount)).rounded())
+    }
+
+    private var accessibilityDescription: String {
+        switch content {
+        case .volume:
+            return "\(title), volume \(Int((displayLevel * 100).rounded())) percent"
+        case .mute(let isMuted):
+            return isMuted ? "\(title), muted" : "\(title), unmuted"
+        case .notControlled:
+            return "\(title), not controlled by FineTune"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer().frame(height: 28)
+            iconView
+                .overlay(alignment: .bottomTrailing) {
+                    if isMuted {
+                        Image(systemName: "speaker.slash.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(DesignTokens.Colors.mutedIndicator)
+                            .padding(5)
+                            .background(Circle().fill(.regularMaterial))
+                            .offset(x: 6, y: 6)
+                    }
+                }
+            Spacer().frame(height: 14)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(DesignTokens.Colors.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, 16)
+            Spacer()
+            bottomRow
+                .frame(height: 16)
+            Spacer().frame(height: 28)
+        }
+        .frame(width: Self.frameSize, height: Self.frameSize)
+        .background {
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
+                .fill(.regularMaterial)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
+                .strokeBorder(DesignTokens.Colors.hudBorder, lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityDescription)
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        if let icon {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: Self.iconSize, height: Self.iconSize)
+        } else {
+            Image(systemName: "app.dashed")
+                .font(.system(size: 48, weight: .regular))
+                .foregroundStyle(DesignTokens.Colors.textSecondary)
+                .frame(width: Self.iconSize, height: Self.iconSize)
+        }
+    }
+
+    @ViewBuilder
+    private var bottomRow: some View {
+        switch content {
+        case .volume:
+            HStack(spacing: Self.tileSpacing) {
+                ForEach(0..<Self.tileCount, id: \.self) { index in
+                    Rectangle()
+                        .fill(index < filledTileCount
+                              ? DesignTokens.Colors.hudTileActive
+                              : DesignTokens.Colors.hudTileInactive)
+                        .frame(width: Self.tileSize, height: Self.tileSize)
+                }
+            }
+            .animation(DesignTokens.Animation.quick, value: filledTileCount)
+        case .mute(let isMuted):
+            Text(isMuted ? "Muted" : "Unmuted")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(DesignTokens.Colors.textSecondary)
+        case .notControlled:
+            Text("Not controlled by FineTune")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(DesignTokens.Colors.textSecondary)
+        }
+    }
 }

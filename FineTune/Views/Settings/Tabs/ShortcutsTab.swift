@@ -86,6 +86,17 @@ struct ShortcutsTab: View {
                     HUDStyleSegmentedControl(selection: $settings.appSettings.hudStyle)
                 }
             }
+
+            SettingsRowDivider()
+            SettingsRow(
+                "Show Over Full-Screen Apps",
+                description: "Show the volume indicator for system and app volume changes while a full-screen app is in front"
+            ) {
+                Toggle("", isOn: $settings.appSettings.hudShowsOverFullscreen)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
         }
     }
 

@@ -234,6 +234,11 @@ struct FineTuneApp: App {
             appAudio: engine,
             systemVolume: engine.deviceVolumeMonitor as! DeviceVolumeMonitor
         )
+        midiRegistry.hud = hud
+        midiRegistry.appHUD = hud
+        midiRegistry.deviceNameProvider = { [weak engine] deviceID in
+            engine?.deviceMonitor.outputDevices.first { $0.id == deviceID }?.name ?? ""
+        }
         midiRegistry.reconcile()
         _midiRegistry = State(initialValue: midiRegistry)
 

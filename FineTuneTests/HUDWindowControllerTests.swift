@@ -184,6 +184,38 @@ struct HUDWindowControllerTimerTests {
         #expect(hud.hideDelay(for: .classic) == .milliseconds(250))
     }
 
+    // MARK: - Full-screen preference
+
+    private func makeFullscreenController(showOverFullscreen: Bool) -> HUDWindowController {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let settings = SettingsManager(directory: tempDir)
+        settings.appSettings.hudShowsOverFullscreen = showOverFullscreen
+        let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: MediaKeyStatus(), popupVisibility: PopupVisibilityService())
+        hud.frameProvider = { NSRect(x: 0, y: 23, width: 1440, height: 877) }
+        hud.fullscreenDetector = { true }
+        return hud
+    }
+
+    @Test("full-screen app hides system and per-app HUDs by default")
+    func fullscreenHidesByDefault() {
+        let hud = makeFullscreenController(showOverFullscreen: false)
+        hud.show(sliderFraction: 0.5, mute: false, deviceName: "")
+        #expect(hud.showDidUpdatePanel == false)
+        hud.showMIDIAppVolumeHUD(icon: nil, title: "App", sliderFraction: 0.5)
+        #expect(hud.showDidUpdatePanel == false)
+    }
+
+    @Test("show-over-full-screen preference shows system and per-app HUDs")
+    func fullscreenPreferenceShows() {
+        let hud = makeFullscreenController(showOverFullscreen: true)
+        hud.show(sliderFraction: 0.5, mute: false, deviceName: "")
+        #expect(hud.showDidUpdatePanel == true)
+        hud.showMIDIAppMuteHUD(icon: nil, title: "App", isMuted: true)
+        #expect(hud.showDidUpdatePanel == true)
+        hud.shutdown()
+    }
+
     // MARK: - Popup-visibility guard (AC #23)
 
     @Test("popupGuardSuppressesShow: popup visible ⇒ show() does not update panel")

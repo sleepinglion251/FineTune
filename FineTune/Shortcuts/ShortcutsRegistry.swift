@@ -235,3 +235,4 @@ final class ShortcutsRegistry {
 
 extension AudioEngine: AudioEngineDispatching {}
 extension HUDWindowController: PerAppHUDPresenting {}
+extension HUDWindowController: MIDIAppHUDPresenting {}
