@@ -635,6 +635,7 @@ final class AudioEngine {
         for tap in taps.values {
             applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
             tap.updateEQSettings(.flat)
+            tap.updateDeviceEQSettings(.flat)
             tap.updateAutoEQProfile(nil)
             tap.updateLoudnessCompensation(volume: effectiveLoudnessVolume(for: tap), enabled: false)
         }
@@ -765,6 +766,31 @@ final class AudioEngine {
         return settingsManager.getEQSettings(for: app.persistenceIdentifier)
     }
 
+    // MARK: - Per-Device EQ
+
+    func getDeviceEQSettings(for deviceUID: String) -> EQSettings {
+        settingsManager.getDeviceEQSettings(for: deviceUID)
+    }
+
+    /// Persists the device's EQ and pushes it to every tap playing only to that device.
+    func setDeviceEQSettings(_ settings: EQSettings, for deviceUID: String) {
+        settingsManager.setDeviceEQSettings(settings, for: deviceUID)
+        for tap in taps.values where tap.currentDeviceUIDs.contains(deviceUID) {
+            applyDeviceEQToTap(tap)
+        }
+    }
+
+    /// Device EQ for a tap's routing. Taps that fan out to several devices get a flat
+    /// curve: one processing chain feeds them all, so no single device's EQ fits.
+    private func deviceEQSettings(forOutputUIDs deviceUIDs: [String]) -> EQSettings {
+        guard deviceUIDs.count == 1, let uid = deviceUIDs.first else { return .flat }
+        return settingsManager.getDeviceEQSettings(for: uid)
+    }
+
+    private func applyDeviceEQToTap(_ tap: any ProcessTapControlling) {
+        tap.updateDeviceEQSettings(deviceEQSettings(forOutputUIDs: tap.currentDeviceUIDs))
+    }
+
     // MARK: - Per-Device AutoEQ
 
     func getAutoEQProfile(for deviceUID: String) -> AutoEQProfile? {
@@ -832,11 +858,13 @@ final class AudioEngine {
         return autoEQProfileManager.profile(for: selection.profileID)
     }
 
-    private func tapInitialState(forApp app: AudioApp, primaryDeviceUID: String, deviceVolume: Float) -> TapInitialState {
+    private func tapInitialState(forApp app: AudioApp, deviceUIDs: [String], deviceVolume: Float) -> TapInitialState {
+        let primaryDeviceUID = deviceUIDs[0]
         var loudnessEqSettings = LoudnessEqualizerSettings()
         loudnessEqSettings.enabled = settingsManager.appSettings.loudnessEqualizationEnabled
         return TapInitialState(
             eqSettings: settingsManager.getEQSettings(for: app.persistenceIdentifier),
+            deviceEQSettings: deviceEQSettings(forOutputUIDs: deviceUIDs),
             autoEQProfile: autoEQProfileForActivation(deviceUID: primaryDeviceUID),
             autoEQPreampEnabled: settingsManager.autoEQPreampEnabled,
             loudnessVolume: deviceVolume * volumeState.getVolume(for: app.id),
@@ -845,9 +873,12 @@ final class AudioEngine {
         )
     }
 
+    /// Applies the per-device processing for the tap's current routing: device EQ, then AutoEQ.
+    /// Called after every routing change, so both follow the tap to its new device.
     /// Skips AutoEQ entirely for devices that don't support it (speakers, HDMI, etc.).
     /// If the profile isn't loaded yet, triggers an async fetch and applies when ready.
     private func applyAutoEQToTap(_ tap: any ProcessTapControlling) {
+        applyDeviceEQToTap(tap)
         guard let deviceUID = tap.currentDeviceUID else { return }
 
         // Skip AutoEQ for non-headphone devices (or if device not found in monitor)
@@ -1070,7 +1101,7 @@ final class AudioEngine {
 
             let initial = tapInitialState(
                 forApp: app,
-                primaryDeviceUID: deviceUIDs[0],
+                deviceUIDs: deviceUIDs,
                 deviceVolume: tap.currentDeviceVolume
             )
             try tap.activate(initial: initial)
@@ -1231,7 +1262,7 @@ final class AudioEngine {
 
             let initial = tapInitialState(
                 forApp: app,
-                primaryDeviceUID: deviceUID,
+                deviceUIDs: [deviceUID],
                 deviceVolume: tap.currentDeviceVolume
             )
             try tap.activate(initial: initial)

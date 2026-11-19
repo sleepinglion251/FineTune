@@ -18,6 +18,7 @@ final class RecordingProcessTapController: ProcessTapControlling {
     enum Event: Equatable {
         case activate(TapInitialStateSnapshot)
         case updateEQSettings(EQSettings)
+        case updateDeviceEQSettings(EQSettings)
         case updateAutoEQProfile(profileID: String?)
         case setAutoEQPreampEnabled(Bool)
         case updateLoudnessCompensation(volume: Float, enabled: Bool)
@@ -29,6 +30,7 @@ final class RecordingProcessTapController: ProcessTapControlling {
     /// the source-type's identity (defensive against future mutations).
     struct TapInitialStateSnapshot: Equatable {
         var eqSettings: EQSettings
+        var deviceEQSettings: EQSettings
         var autoEQProfileID: String?
         var autoEQPreampEnabled: Bool
         var loudnessVolume: Float
@@ -38,6 +40,7 @@ final class RecordingProcessTapController: ProcessTapControlling {
         @MainActor
         init(_ s: TapInitialState) {
             self.eqSettings = s.eqSettings
+            self.deviceEQSettings = s.deviceEQSettings
             self.autoEQProfileID = s.autoEQProfile?.id
             self.autoEQPreampEnabled = s.autoEQPreampEnabled
             self.loudnessVolume = s.loudnessVolume
@@ -74,6 +77,10 @@ final class RecordingProcessTapController: ProcessTapControlling {
 
     func updateEQSettings(_ settings: EQSettings) {
         events.append(.updateEQSettings(settings))
+    }
+
+    func updateDeviceEQSettings(_ settings: EQSettings) {
+        events.append(.updateDeviceEQSettings(settings))
     }
 
     func updateAutoEQProfile(_ profile: AutoEQProfile?) {
@@ -387,7 +394,7 @@ struct AudioEngineTapInitialStateTests {
 
         for event in tap.events.prefix(activateIndex) {
             switch event {
-            case .updateEQSettings, .updateAutoEQProfile, .setAutoEQPreampEnabled,
+            case .updateEQSettings, .updateDeviceEQSettings, .updateAutoEQProfile, .setAutoEQPreampEnabled,
                  .updateLoudnessCompensation, .updateLoudnessEqualization:
                 Issue.record("Pre-activate mutation breaks the apply-initial-state contract: \(event)")
             case .activate, .invalidate:
@@ -511,5 +518,79 @@ struct RecordingProcessTapControllerContractTests {
         } else {
             Issue.record("activate() did not record an .activate event")
         }
+    }
+}
+
+// MARK: - Per-device EQ
+
+@Suite("AudioEngine — per-output-device EQ")
+@MainActor
+struct AudioEngineDeviceEQTests {
+    private let curve = EQSettings(bandGains: [6, 4, 0, 0, -2, 0, 0, 0, 3, 5], isEnabled: true)
+
+    private func lastDeviceEQ(_ tap: RecordingProcessTapController) -> EQSettings? {
+        for event in tap.events.reversed() {
+            if case let .updateDeviceEQSettings(settings) = event { return settings }
+        }
+        return nil
+    }
+
+    @Test("a device's saved EQ lands in TapInitialState for taps on that device")
+    func initialStateCarriesDeviceEQ() throws {
+        let fix = makeFixture()
+        fix.settings.setDeviceEQSettings(curve, for: fix.device.uid)
+
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+
+        let snap = try #require(capturedInitial(fix))
+        #expect(snap.deviceEQSettings == curve)
+        #expect(snap.eqSettings == .flat)  // per-app EQ stays independent
+    }
+
+    @Test("changing a device's EQ persists it and updates taps playing to that device")
+    func setPushesToTapsOnDevice() throws {
+        let fix = makeFixture()
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+        let tap = try #require(fix.lastTap())
+
+        fix.engine.setDeviceEQSettings(curve, for: fix.device.uid)
+
+        #expect(lastDeviceEQ(tap) == curve)
+        #expect(fix.engine.getDeviceEQSettings(for: fix.device.uid) == curve)
+    }
+
+    @Test("another device's EQ doesn't touch taps on this device")
+    func otherDeviceIgnored() throws {
+        let fix = makeFixture()
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+        let tap = try #require(fix.lastTap())
+
+        fix.engine.setDeviceEQSettings(curve, for: "some-other-device")
+
+        #expect(lastDeviceEQ(tap) == nil)
+    }
+
+    @Test("a tap fanned out to several devices gets a flat device EQ")
+    func multiDeviceTapIsFlat() async throws {
+        let fix = makeFixture()
+        let second = AudioDevice(id: AudioDeviceID(100), uid: "uid-second", name: "Second", icon: nil, supportsAutoEQ: false)
+        fix.deviceMonitor.addOutputDevice(second)
+        fix.settings.setDeviceEQSettings(curve, for: fix.device.uid)
+
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+        let tap = try #require(fix.lastTap())
+        fix.engine.setSelectedDeviceUIDs(for: fix.app, to: [fix.device.uid, second.uid])
+        fix.engine.setDeviceSelectionMode(for: fix.app, to: .multi)
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while fix.lastTap()?.currentDeviceUIDs.count != 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let multiTap = try #require(fix.lastTap())
+        try #require(multiTap.currentDeviceUIDs.count == 2)
+
+        fix.engine.setDeviceEQSettings(curve, for: fix.device.uid)
+        #expect(lastDeviceEQ(multiTap) == .flat)
+        _ = tap
     }
 }

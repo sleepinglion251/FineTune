@@ -619,7 +619,31 @@ struct MenuBarPopupView: View {
                             audioEngine.setAutoEQPreampEnabled(!audioEngine.autoEQPreampEnabled)
                         },
                         isFocused: hasKeyboardEngaged && selectedRow == .device(uid: device.uid),
-                        iconOverrideSymbol: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid)
+                        iconOverrideSymbol: audioEngine.settingsManager.getDeviceIconOverride(for: device.uid),
+                        eqSettings: audioEngine.getDeviceEQSettings(for: device.uid),
+                        userPresets: audioEngine.settingsManager.getUserPresets(),
+                        isEQExpanded: expandedRowID == Self.deviceEQRowID(device.uid),
+                        onEQToggle: {
+                            toggleDeviceEQ(for: device.uid)
+                        },
+                        onEQChange: { settings in
+                            audioEngine.setDeviceEQSettings(settings, for: device.uid)
+                        },
+                        onUserPresetSelected: { userPreset in
+                            // Apply only bandGains — preserve the device's current isEnabled state
+                            var current = audioEngine.getDeviceEQSettings(for: device.uid)
+                            current.bandGains = userPreset.settings.bandGains
+                            audioEngine.setDeviceEQSettings(current, for: device.uid)
+                        },
+                        onSavePreset: { name, settings in
+                            audioEngine.settingsManager.createUserPreset(name: name, settings: settings)
+                        },
+                        onDeleteUserPreset: { id in
+                            audioEngine.settingsManager.deleteUserPreset(id: id)
+                        },
+                        onRenameUserPreset: { id, newName in
+                            audioEngine.settingsManager.updateUserPreset(id: id, name: newName)
+                        }
                     )
                     .id(PopupKeyboardNavModel.RowID.device(uid: device.uid))
                 }
@@ -1013,6 +1037,23 @@ struct MenuBarPopupView: View {
             }
         }
 
+        Task {
+            try? await Task.sleep(for: .seconds(0.4))
+            isEQAnimating = false
+        }
+    }
+
+    /// Device EQ panels share `expandedRowID` with app EQ panels so only one is open
+    /// at a time; the prefix keeps device UIDs from colliding with app identifiers.
+    static func deviceEQRowID(_ deviceUID: String) -> String { "device-eq:" + deviceUID }
+
+    private func toggleDeviceEQ(for deviceUID: String) {
+        guard !isEQAnimating else { return }
+        isEQAnimating = true
+        let rowID = Self.deviceEQRowID(deviceUID)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            expandedRowID = (expandedRowID == rowID) ? nil : rowID
+        }
         Task {
             try? await Task.sleep(for: .seconds(0.4))
             isEQAnimating = false

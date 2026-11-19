@@ -104,6 +104,7 @@ private func processWithDefaults(
     preferredStereoRight: Int = 1,
     currentVol: inout Float,
     eqProc: EQProcessor? = nil,
+    deviceEQProc: EQProcessor? = nil,
     autoEQProc: AutoEQProcessor? = nil,
     loudnessEqualizerProc: LoudnessEqualizer? = nil,
     loudnessCompensatorProc: LoudnessCompensator? = nil
@@ -119,6 +120,7 @@ private func processWithDefaults(
         preferredStereoRight: preferredStereoRight,
         currentVol: &currentVol,
         eqProc: eqProc,
+        deviceEQProc: deviceEQProc,
         autoEQProc: autoEQProc,
         loudnessEqualizerProc: loudnessEqualizerProc,
         loudnessCompensatorProc: loudnessCompensatorProc

@@ -21,6 +21,7 @@ protocol ProcessTapControlling: AnyObject, Sendable {
     func invalidateAsync() async
     func updateEQSettings(_ settings: EQSettings)
     func updateAutoEQProfile(_ profile: AutoEQProfile?)
+    func updateDeviceEQSettings(_ settings: EQSettings)
     func setAutoEQPreampEnabled(_ enabled: Bool)
     func updateLoudnessCompensation(volume: Float, enabled: Bool)
     func updateLoudnessEqualization(_ settings: LoudnessEqualizerSettings)
@@ -70,6 +71,9 @@ extension ProcessTapControlling {
     func recreateForOutputRateChange() async throws {
         // Default no-op for mocks that don't override
     }
+
+    // Default for mocks that don't model per-device EQ.
+    func updateDeviceEQSettings(_ settings: EQSettings) {}
 
     // Defaults for mocks that don't model suspension.
     var isSuspended: Bool { false }

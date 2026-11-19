@@ -143,6 +143,9 @@ final class SettingsManager {
         var hiddenOutputDeviceUIDs: Set<String> = []
         var hiddenInputDeviceUIDs: Set<String> = []
 
+        // Per-output-device 10-band EQ (applied to every app routed to that device)
+        var deviceEQSettings: [String: EQSettings] = [:]  // deviceUID → EQ settings
+
         // Per-device AutoEQ headphone correction
         var deviceAutoEQ: [String: AutoEQSelection] = [:]  // deviceUID → selection
         var favoriteAutoEQProfiles: Set<String> = []  // profile IDs
@@ -194,6 +197,7 @@ final class SettingsManager {
             inputDevicePriority = try c.decodeIfPresent([String].self, forKey: .inputDevicePriority) ?? []
             hiddenOutputDeviceUIDs = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenOutputDeviceUIDs) ?? []
             hiddenInputDeviceUIDs = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenInputDeviceUIDs) ?? []
+            deviceEQSettings = (try? c.decodeIfPresent([String: EQSettings].self, forKey: .deviceEQSettings)) ?? [:]
             deviceAutoEQ = try c.decodeIfPresent([String: AutoEQSelection].self, forKey: .deviceAutoEQ) ?? [:]
             favoriteAutoEQProfiles = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteAutoEQProfiles) ?? []
             autoEQPreampEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoEQPreampEnabled) ?? true
@@ -277,6 +281,17 @@ final class SettingsManager {
 
     func setEQSettings(_ eqSettings: EQSettings, for appIdentifier: String) {
         settings.appEQSettings[appIdentifier] = eqSettings
+        scheduleSave()
+    }
+
+    // MARK: - Per-Device EQ
+
+    func getDeviceEQSettings(for deviceUID: String) -> EQSettings {
+        settings.deviceEQSettings[deviceUID] ?? EQSettings.flat
+    }
+
+    func setDeviceEQSettings(_ eqSettings: EQSettings, for deviceUID: String) {
+        settings.deviceEQSettings[deviceUID] = eqSettings
         scheduleSave()
     }
 
