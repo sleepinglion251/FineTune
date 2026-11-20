@@ -643,7 +643,11 @@ struct MenuBarPopupView: View {
                         },
                         onRenameUserPreset: { id, newName in
                             audioEngine.settingsManager.updateUserPreset(id: id, name: newName)
-                        }
+                        },
+                        effectSlots: audioEngine.getEffectChain(for: .device(uid: device.uid)),
+                        onEffectsChange: { slots in audioEngine.setEffectChain(slots, for: .device(uid: device.uid)) },
+                        onEditEffect: { slot in openEffectEditor(slot, owner: .device(uid: device.uid), ownerName: device.name) },
+                        onRemoveEffect: { slot in EffectEditorManager.shared.close(slotID: slot.id) }
                     )
                     .id(PopupKeyboardNavModel.RowID.device(uid: device.uid))
                 }
@@ -947,7 +951,11 @@ struct MenuBarPopupView: View {
                 onEQToggle: {
                     toggleEQ(for: displayableApp.id, scrollProxy: scrollProxy)
                 },
-                isFocused: hasKeyboardEngaged && selectedRow == .app(persistenceID: displayableApp.id)
+                isFocused: hasKeyboardEngaged && selectedRow == .app(persistenceID: displayableApp.id),
+                effectSlots: audioEngine.getEffectChain(for: .app(identifier: app.persistenceIdentifier)),
+                onEffectsChange: { slots in audioEngine.setEffectChain(slots, for: .app(identifier: app.persistenceIdentifier)) },
+                onEditEffect: { slot in openEffectEditor(slot, owner: .app(identifier: app.persistenceIdentifier), ownerName: app.name) },
+                onRemoveEffect: { slot in EffectEditorManager.shared.close(slotID: slot.id) }
             )
             .id(PopupKeyboardNavModel.RowID.app(persistenceID: displayableApp.id))
         }
@@ -1015,7 +1023,11 @@ struct MenuBarPopupView: View {
             onEQToggle: {
                 toggleEQ(for: displayableApp.id, scrollProxy: scrollProxy)
             },
-            isFocused: hasKeyboardEngaged && selectedRow == .app(persistenceID: displayableApp.id)
+            isFocused: hasKeyboardEngaged && selectedRow == .app(persistenceID: displayableApp.id),
+            effectSlots: audioEngine.getEffectChain(for: .app(identifier: identifier)),
+            onEffectsChange: { slots in audioEngine.setEffectChain(slots, for: .app(identifier: identifier)) },
+            onEditEffect: { slot in openEffectEditor(slot, owner: .app(identifier: identifier), ownerName: info.displayName) },
+            onRemoveEffect: { slot in EffectEditorManager.shared.close(slotID: slot.id) }
         )
         .id(PopupKeyboardNavModel.RowID.app(persistenceID: displayableApp.id))
     }
@@ -1041,6 +1053,36 @@ struct MenuBarPopupView: View {
             try? await Task.sleep(for: .seconds(0.4))
             isEQAnimating = false
         }
+    }
+
+    /// Opens the effect's editor window, attached to the running instance when audio is
+    /// playing. Edits are copied to every other running copy and saved; choosing a preset
+    /// reloads every running copy.
+    private func openEffectEditor(_ slot: AudioEffectSlot, owner: EffectChainOwner, ownerName: String) {
+        let engine = audioEngine
+        let slotID = slot.id
+        EffectEditorManager.shared.open(
+            slot: slot,
+            ownerName: ownerName,
+            sampleRate: engine.effectEditorSampleRate,
+            actions: EffectEditorActions(
+                liveEffect: {
+                    engine.liveEffect(owner: owner, slotID: slotID)
+                },
+                savedState: {
+                    engine.getEffectChain(for: owner).first { $0.id == slotID }?.state
+                },
+                parameterChanged: { id, scope, element, value in
+                    engine.setEffectParameter(owner: owner, slotID: slotID, id: id, scope: scope, element: element, value: value)
+                },
+                stateLoaded: { state in
+                    engine.saveEffectState(state, owner: owner, slotID: slotID, applyToRunning: true)
+                },
+                saveState: { state in
+                    engine.saveEffectState(state, owner: owner, slotID: slotID, applyToRunning: false)
+                }
+            )
+        )
     }
 
     /// Device EQ panels share `expandedRowID` with app EQ panels so only one is open

@@ -636,6 +636,8 @@ final class AudioEngine {
             applyTapOutputState(to: tap, for: tap.app.id, deviceUIDs: tap.currentDeviceUIDs)
             tap.updateEQSettings(.flat)
             tap.updateDeviceEQSettings(.flat)
+            tap.updateEffectChain([], stage: .app)
+            tap.updateEffectChain([], stage: .device)
             tap.updateAutoEQProfile(nil)
             tap.updateLoudnessCompensation(volume: effectiveLoudnessVolume(for: tap), enabled: false)
         }
@@ -787,8 +789,89 @@ final class AudioEngine {
         return settingsManager.getDeviceEQSettings(for: uid)
     }
 
+    /// Device EQ and the device effect chain for the tap's current routing.
     private func applyDeviceEQToTap(_ tap: any ProcessTapControlling) {
         tap.updateDeviceEQSettings(deviceEQSettings(forOutputUIDs: tap.currentDeviceUIDs))
+        tap.updateEffectChain(deviceEffects(forOutputUIDs: tap.currentDeviceUIDs), stage: .device)
+    }
+
+    // MARK: - Effect Chains
+
+    func getEffectChain(for owner: EffectChainOwner) -> [AudioEffectSlot] {
+        settingsManager.getEffectChain(for: owner)
+    }
+
+    /// Persists a chain and pushes it to every tap it applies to. Effects that stay in
+    /// the chain keep running, so this is also how bypass and saved-state edits land.
+    func setEffectChain(_ slots: [AudioEffectSlot], for owner: EffectChainOwner) {
+        settingsManager.setEffectChain(slots, for: owner)
+        for (tap, stage) in taps(for: owner) {
+            switch stage {
+            case .app: tap.updateEffectChain(slots, stage: .app)
+            case .device: tap.updateEffectChain(deviceEffects(forOutputUIDs: tap.currentDeviceUIDs), stage: .device)
+            }
+        }
+    }
+
+    /// Live parameter change from an open editor: forwarded to every running copy.
+    func setEffectParameter(owner: EffectChainOwner, slotID: UUID, id: AudioUnitParameterID, scope: AudioUnitScope, element: AudioUnitElement, value: AudioUnitParameterValue) {
+        for (tap, stage) in taps(for: owner) {
+            tap.setEffectParameter(stage: stage, slotID: slotID, id: id, scope: scope, element: element, value: value)
+        }
+    }
+
+    /// Saves an effect's full state. With `applyToRunning`, also loads it into the running
+    /// copies (a preset was chosen); otherwise they already match via parameter forwarding.
+    func saveEffectState(_ state: Data, owner: EffectChainOwner, slotID: UUID, applyToRunning: Bool) {
+        var slots = settingsManager.getEffectChain(for: owner)
+        guard let index = slots.firstIndex(where: { $0.id == slotID }) else { return }
+        slots[index].state = state
+        settingsManager.setEffectChain(slots, for: owner)
+        for (tap, stage) in taps(for: owner) {
+            if applyToRunning {
+                tap.applyEffectState(stage: stage, slotID: slotID, state: state)
+            }
+            // Keep the taps' copy of the slot list current so rebuilds (rate change,
+            // device switch) restore the edited state.
+            switch stage {
+            case .app: tap.updateEffectChain(slots, stage: .app)
+            case .device: tap.updateEffectChain(deviceEffects(forOutputUIDs: tap.currentDeviceUIDs), stage: .device)
+            }
+        }
+    }
+
+    /// The running instance an editor should attach to, so the effect's own meters and
+    /// displays show the real audio. Prefers a tap that is currently playing.
+    func liveEffect(owner: EffectChainOwner, slotID: UUID) -> HostedEffect? {
+        let candidates = taps(for: owner).compactMap { tap, stage in
+            tap.liveEffect(stage: stage, slotID: slotID).map { (tap, $0) }
+        }
+        if let playing = candidates.first(where: { $0.0.hasRecentAudioCallback(within: 1.0) && !$0.0.isSuspended }) {
+            return playing.1
+        }
+        return candidates.first?.1
+    }
+
+    /// Sample rate an editor instance should use: the default device's, else 48 kHz.
+    var effectEditorSampleRate: Double {
+        let defaultID = deviceVolumeMonitor.defaultDeviceID
+        guard defaultID.isValid, let rate = try? defaultID.readNominalSampleRate() else { return 48000 }
+        return rate
+    }
+
+    /// Device chain for a tap's routing; empty when it fans out to several devices.
+    private func deviceEffects(forOutputUIDs deviceUIDs: [String]) -> [AudioEffectSlot] {
+        guard deviceUIDs.count == 1, let uid = deviceUIDs.first else { return [] }
+        return settingsManager.getEffectChain(for: .device(uid: uid))
+    }
+
+    private func taps(for owner: EffectChainOwner) -> [(any ProcessTapControlling, EffectChainStage)] {
+        switch owner {
+        case .app(let identifier):
+            return taps.values.filter { $0.app.persistenceIdentifier == identifier }.map { ($0, .app) }
+        case .device(let uid):
+            return taps.values.filter { $0.currentDeviceUIDs == [uid] }.map { ($0, .device) }
+        }
     }
 
     // MARK: - Per-Device AutoEQ
@@ -865,6 +948,8 @@ final class AudioEngine {
         return TapInitialState(
             eqSettings: settingsManager.getEQSettings(for: app.persistenceIdentifier),
             deviceEQSettings: deviceEQSettings(forOutputUIDs: deviceUIDs),
+            appEffects: settingsManager.getEffectChain(for: .app(identifier: app.persistenceIdentifier)),
+            deviceEffects: deviceEffects(forOutputUIDs: deviceUIDs),
             autoEQProfile: autoEQProfileForActivation(deviceUID: primaryDeviceUID),
             autoEQPreampEnabled: settingsManager.autoEQPreampEnabled,
             loudnessVolume: deviceVolume * volumeState.getVolume(for: app.id),

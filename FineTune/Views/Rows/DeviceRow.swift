@@ -55,6 +55,12 @@ struct DeviceRow: View {
     let onDeleteUserPreset: (UUID) -> Void
     let onRenameUserPreset: (UUID, String) -> Void
 
+    // Audio Unit effect chain (shown in the EQ panel when `onEffectsChange` is set)
+    let effectSlots: [AudioEffectSlot]
+    let onEffectsChange: (([AudioEffectSlot]) -> Void)?
+    let onEditEffect: (AudioEffectSlot) -> Void
+    let onRemoveEffect: (AudioEffectSlot) -> Void
+
     @State private var localEQSettings: EQSettings
 
     @State private var sliderValue: Double
@@ -116,8 +122,16 @@ struct DeviceRow: View {
         onUserPresetSelected: @escaping (UserEQPreset) -> Void = { _ in },
         onSavePreset: @escaping (String, EQSettings) -> Void = { _, _ in },
         onDeleteUserPreset: @escaping (UUID) -> Void = { _ in },
-        onRenameUserPreset: @escaping (UUID, String) -> Void = { _, _ in }
+        onRenameUserPreset: @escaping (UUID, String) -> Void = { _, _ in },
+        effectSlots: [AudioEffectSlot] = [],
+        onEffectsChange: (([AudioEffectSlot]) -> Void)? = nil,
+        onEditEffect: @escaping (AudioEffectSlot) -> Void = { _ in },
+        onRemoveEffect: @escaping (AudioEffectSlot) -> Void = { _ in }
     ) {
+        self.effectSlots = effectSlots
+        self.onEffectsChange = onEffectsChange
+        self.onEditEffect = onEditEffect
+        self.onRemoveEffect = onRemoveEffect
         self.eqSettings = eqSettings
         self.userPresets = userPresets
         self.isEQExpanded = isEQExpanded
@@ -155,7 +169,7 @@ struct DeviceRow: View {
 
     /// A non-flat, enabled device EQ tints the closed EQ button.
     private var isDeviceEQActive: Bool {
-        eqSettings.isEnabled && eqSettings.bandGains.contains { $0 != 0 }
+        (eqSettings.isEnabled && eqSettings.bandGains.contains { $0 != 0 }) || effectSlots.hasActiveEffects
     }
 
     var body: some View {
@@ -194,6 +208,16 @@ struct DeviceRow: View {
                 )
                 .padding(.top, DesignTokens.Spacing.sm)
                 .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+
+                if let onEffectsChange {
+                    EffectChainView(
+                        slots: effectSlots,
+                        onChange: onEffectsChange,
+                        onEdit: onEditEffect,
+                        onRemove: onRemoveEffect
+                    )
+                    .transition(.opacity)
+                }
             }
         }
         .hoverableRow(isFocused: isFocused || isEQExpanded)

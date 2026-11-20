@@ -125,6 +125,9 @@ final class ProcessTapController: ProcessTapControlling {
     /// Per-output-device EQ, applied after the per-app EQ.
     private nonisolated(unsafe) var deviceEQProcessor: EQProcessor?
     private nonisolated(unsafe) var autoEQProcessor: AutoEQProcessor?
+    /// Audio Unit effect chains, after all EQ and before loudness/limiting.
+    private nonisolated(unsafe) var appEffectsProcessor: EffectChainProcessor?
+    private nonisolated(unsafe) var deviceEffectsProcessor: EffectChainProcessor?
     private nonisolated(unsafe) var loudnessCompensator: LoudnessCompensator?
     private nonisolated(unsafe) var loudnessEqualizerProcessor: LoudnessEqualizer?
     /// Last effective loudness volume (device × app) passed to updateLoudnessCompensation.
@@ -136,6 +139,8 @@ final class ProcessTapController: ProcessTapControlling {
     private nonisolated(unsafe) var secondaryEQProcessor: EQProcessor?
     private nonisolated(unsafe) var secondaryDeviceEQProcessor: EQProcessor?
     private nonisolated(unsafe) var secondaryAutoEQProcessor: AutoEQProcessor?
+    private nonisolated(unsafe) var secondaryAppEffectsProcessor: EffectChainProcessor?
+    private nonisolated(unsafe) var secondaryDeviceEffectsProcessor: EffectChainProcessor?
     private nonisolated(unsafe) var secondaryLoudnessCompensator: LoudnessCompensator?
     private nonisolated(unsafe) var secondaryLoudnessEqualizerProcessor: LoudnessEqualizer?
 
@@ -266,6 +271,41 @@ final class ProcessTapController: ProcessTapControlling {
     func updateDeviceEQSettings(_ settings: EQSettings) {
         deviceEQProcessor?.updateSettings(settings)
         secondaryDeviceEQProcessor?.updateSettings(settings)
+    }
+
+    func updateEffectChain(_ slots: [AudioEffectSlot], stage: EffectChainStage) {
+        switch stage {
+        case .app:
+            appEffectsProcessor?.update(slots)
+            secondaryAppEffectsProcessor?.update(slots)
+        case .device:
+            deviceEffectsProcessor?.update(slots)
+            secondaryDeviceEffectsProcessor?.update(slots)
+        }
+    }
+
+    func setEffectParameter(stage: EffectChainStage, slotID: UUID, id: AudioUnitParameterID, scope: AudioUnitScope, element: AudioUnitElement, value: AudioUnitParameterValue) {
+        for processor in effectProcessors(for: stage) {
+            processor.setParameter(slotID: slotID, id: id, scope: scope, element: element, value: value)
+        }
+    }
+
+    func applyEffectState(stage: EffectChainStage, slotID: UUID, state: Data) {
+        for processor in effectProcessors(for: stage) {
+            processor.applyState(slotID: slotID, state: state)
+        }
+    }
+
+    func liveEffect(stage: EffectChainStage, slotID: UUID) -> HostedEffect? {
+        let processor = stage == .app ? appEffectsProcessor : deviceEffectsProcessor
+        return processor?.effect(slotID: slotID)
+    }
+
+    private func effectProcessors(for stage: EffectChainStage) -> [EffectChainProcessor] {
+        switch stage {
+        case .app: return [appEffectsProcessor, secondaryAppEffectsProcessor].compactMap { $0 }
+        case .device: return [deviceEffectsProcessor, secondaryDeviceEffectsProcessor].compactMap { $0 }
+        }
     }
 
     func updateAutoEQProfile(_ profile: AutoEQProfile?) {
@@ -665,6 +705,8 @@ final class ProcessTapController: ProcessTapControlling {
         eqProcessor = EQProcessor(sampleRate: sampleRate)
         deviceEQProcessor = EQProcessor(sampleRate: sampleRate)
         autoEQProcessor = AutoEQProcessor(sampleRate: sampleRate)
+        appEffectsProcessor = EffectChainProcessor(sampleRate: sampleRate, slots: initial.appEffects)
+        deviceEffectsProcessor = EffectChainProcessor(sampleRate: sampleRate, slots: initial.deviceEffects)
         loudnessEqualizerProcessor = LoudnessEqualizer(settings: initial.loudnessEqualizerSettings, sampleRate: Float(sampleRate))
         loudnessCompensator = LoudnessCompensator(sampleRate: sampleRate)
 
@@ -967,6 +1009,8 @@ final class ProcessTapController: ProcessTapControlling {
     private func endInvalidation() {
         secondaryEQProcessor = nil
         secondaryDeviceEQProcessor = nil
+        secondaryAppEffectsProcessor = nil
+        secondaryDeviceEffectsProcessor = nil
         secondaryAutoEQProcessor = nil
         secondaryLoudnessCompensator = nil
         secondaryLoudnessEqualizerProcessor = nil
@@ -1134,6 +1178,12 @@ final class ProcessTapController: ProcessTapControlling {
         }
         secondaryDeviceEQProcessor = secDeviceEQ
 
+        // Fresh effect instances for the secondary IO thread (Audio Units can't be
+        // rendered from two threads). The engine pushes the new device's chain after
+        // the switch, as with device EQ.
+        secondaryAppEffectsProcessor = EffectChainProcessor(sampleRate: sampleRate, slots: appEffectsProcessor?.slots ?? [])
+        secondaryDeviceEffectsProcessor = EffectChainProcessor(sampleRate: sampleRate, slots: deviceEffectsProcessor?.slots ?? [])
+
         let secAutoEQ = AutoEQProcessor(sampleRate: sampleRate)
         if let profile = autoEQProcessor?.currentProfile {
             secAutoEQ.updateProfile(profile)
@@ -1189,6 +1239,8 @@ final class ProcessTapController: ProcessTapControlling {
         secondaryResources.destroy()
         secondaryEQProcessor = nil
         secondaryDeviceEQProcessor = nil
+        secondaryAppEffectsProcessor = nil
+        secondaryDeviceEffectsProcessor = nil
         secondaryAutoEQProcessor = nil
         secondaryLoudnessCompensator = nil
         secondaryLoudnessEqualizerProcessor = nil
@@ -1208,16 +1260,22 @@ final class ProcessTapController: ProcessTapControlling {
         // so defer their deallocation to ensure no use-after-free on the RT thread.
         let oldEQ = eqProcessor
         let oldDeviceEQ = deviceEQProcessor
+        let oldAppEffects = appEffectsProcessor
+        let oldDeviceEffects = deviceEffectsProcessor
         let oldAutoEQ = autoEQProcessor
         let oldLoudness = loudnessCompensator
         let oldLoudnessEqualizer = loudnessEqualizerProcessor
         eqProcessor = secondaryEQProcessor
         deviceEQProcessor = secondaryDeviceEQProcessor
+        appEffectsProcessor = secondaryAppEffectsProcessor
+        deviceEffectsProcessor = secondaryDeviceEffectsProcessor
         autoEQProcessor = secondaryAutoEQProcessor
         loudnessCompensator = secondaryLoudnessCompensator
         loudnessEqualizerProcessor = secondaryLoudnessEqualizerProcessor
         secondaryEQProcessor = nil
         secondaryDeviceEQProcessor = nil
+        secondaryAppEffectsProcessor = nil
+        secondaryDeviceEffectsProcessor = nil
         secondaryAutoEQProcessor = nil
         secondaryLoudnessCompensator = nil
         secondaryLoudnessEqualizerProcessor = nil
@@ -1225,10 +1283,13 @@ final class ProcessTapController: ProcessTapControlling {
         // Deferred cleanup: hold old processors alive briefly so any in-flight RT callback
         // that read the pointer before the swap finishes its buffer without accessing freed memory.
         // 0.5s is conservative — audio callbacks run at ~5ms intervals.
-        if oldEQ != nil || oldDeviceEQ != nil || oldAutoEQ != nil || oldLoudness != nil || oldLoudnessEqualizer != nil {
+        if oldEQ != nil || oldDeviceEQ != nil || oldAutoEQ != nil || oldLoudness != nil || oldLoudnessEqualizer != nil
+            || oldAppEffects != nil || oldDeviceEffects != nil {
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                 _ = oldEQ
                 _ = oldDeviceEQ
+                _ = oldAppEffects
+                _ = oldDeviceEffects
                 _ = oldAutoEQ
                 _ = oldLoudness
                 _ = oldLoudnessEqualizer
@@ -1366,6 +1427,8 @@ final class ProcessTapController: ProcessTapControlling {
             eqProcessor?.updateSampleRate(deviceSampleRate)
             deviceEQProcessor?.updateSampleRate(deviceSampleRate)
             autoEQProcessor?.updateSampleRate(deviceSampleRate)
+            appEffectsProcessor?.updateSampleRate(deviceSampleRate)
+            deviceEffectsProcessor?.updateSampleRate(deviceSampleRate)
             loudnessCompensator?.updateSampleRate(deviceSampleRate)
 
             // LoudnessEqualizer is immutable — swap to new instance at new sample rate
@@ -1448,6 +1511,8 @@ final class ProcessTapController: ProcessTapControlling {
         eqProc: EQProcessor?,
         deviceEQProc: EQProcessor?,
         autoEQProc: AutoEQProcessor?,
+        appEffectsProc: EffectChainProcessor? = nil,
+        deviceEffectsProc: EffectChainProcessor? = nil,
         loudnessEqualizerProc: LoudnessEqualizer?,
         loudnessCompensatorProc: LoudnessCompensator?
     ) {
@@ -1580,6 +1645,12 @@ final class ProcessTapController: ProcessTapControlling {
             // Per-device AutoEQ correction (after per-app and device EQ)
             if let autoEQProc, autoEQProc.isEnabled, eqCanProcessStereoInterleaved {
                 autoEQProc.process(input: outputSamples, output: outputSamples, frameCount: frameCount)
+            }
+
+            // Audio Unit effects: app chain, then device chain (after all EQ, before limiting)
+            if eqCanProcessStereoInterleaved {
+                appEffectsProc?.process(outputSamples, frameCount: frameCount)
+                deviceEffectsProc?.process(outputSamples, frameCount: frameCount)
             }
 
             // Loudness Equalization (before loudness compensation)
@@ -1719,6 +1790,8 @@ final class ProcessTapController: ProcessTapControlling {
         let eqProc: EQProcessor?
         let deviceEQProc: EQProcessor?
         let autoEQProc: AutoEQProcessor?
+        let appEffectsProc: EffectChainProcessor?
+        let deviceEffectsProc: EffectChainProcessor?
         let loudnessEqualizerProc: LoudnessEqualizer?
         let loudnessCompensatorProc: LoudnessCompensator?
 
@@ -1734,6 +1807,8 @@ final class ProcessTapController: ProcessTapControlling {
             eqProc = eqProcessor
             deviceEQProc = deviceEQProcessor
             autoEQProc = autoEQProcessor
+            appEffectsProc = appEffectsProcessor
+            deviceEffectsProc = deviceEffectsProcessor
             loudnessEqualizerProc = loudnessEqualizerProcessor
             loudnessCompensatorProc = loudnessCompensator
         } else {
@@ -1747,6 +1822,8 @@ final class ProcessTapController: ProcessTapControlling {
             eqProc = secondaryEQProcessor
             deviceEQProc = secondaryDeviceEQProcessor
             autoEQProc = secondaryAutoEQProcessor
+            appEffectsProc = secondaryAppEffectsProcessor
+            deviceEffectsProc = secondaryDeviceEffectsProcessor
             loudnessEqualizerProc = secondaryLoudnessEqualizerProcessor
             loudnessCompensatorProc = secondaryLoudnessCompensator
         }
@@ -1764,6 +1841,8 @@ final class ProcessTapController: ProcessTapControlling {
             eqProc: eqProc,
             deviceEQProc: deviceEQProc,
             autoEQProc: autoEQProc,
+            appEffectsProc: appEffectsProc,
+            deviceEffectsProc: deviceEffectsProc,
             loudnessEqualizerProc: loudnessEqualizerProc,
             loudnessCompensatorProc: loudnessCompensatorProc
         )

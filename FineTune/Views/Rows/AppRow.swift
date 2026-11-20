@@ -33,6 +33,11 @@ struct AppRow: View {
     let onRenameUserPreset: (UUID, String) -> Void
     let isEQExpanded: Bool
     let onEQToggle: () -> Void
+    // Audio Unit effect chain (optional — omitted rows show no Effects section)
+    let effectSlots: [AudioEffectSlot]
+    let onEffectsChange: (([AudioEffectSlot]) -> Void)?
+    let onEditEffect: (AudioEffectSlot) -> Void
+    let onRemoveEffect: (AudioEffectSlot) -> Void
     let isFocused: Bool
 
     @State private var isIconHovered = false
@@ -68,8 +73,16 @@ struct AppRow: View {
         onRenameUserPreset: @escaping (UUID, String) -> Void = { _, _ in },
         isEQExpanded: Bool = false,
         onEQToggle: @escaping () -> Void = {},
-        isFocused: Bool = false
+        isFocused: Bool = false,
+        effectSlots: [AudioEffectSlot] = [],
+        onEffectsChange: (([AudioEffectSlot]) -> Void)? = nil,
+        onEditEffect: @escaping (AudioEffectSlot) -> Void = { _ in },
+        onRemoveEffect: @escaping (AudioEffectSlot) -> Void = { _ in }
     ) {
+        self.effectSlots = effectSlots
+        self.onEffectsChange = onEffectsChange
+        self.onEditEffect = onEditEffect
+        self.onRemoveEffect = onRemoveEffect
         self.app = app
         self.volume = volume
         self.audioLevel = audioLevel
@@ -182,25 +195,35 @@ struct AppRow: View {
         } expandedContent: {
             // EQ panel - shown when expanded
             // SwiftUI calculates natural height via conditional rendering
-            EQPanelView(
-                settings: $localEQSettings,
-                userPresets: userPresets,
-                onPresetSelected: { preset in
-                    localEQSettings = preset.settings
-                    onEQChange(preset.settings)
-                },
-                onUserPresetSelected: { userPreset in
-                    localEQSettings = userPreset.settings
-                    onUserPresetSelected(userPreset)
-                },
-                onSettingsChanged: { settings in
-                    onEQChange(settings)
-                },
-                onSavePreset: onSavePreset,
-                onDeleteUserPreset: onDeleteUserPreset,
-                onRenameUserPreset: onRenameUserPreset
-            )
-            .padding(.top, DesignTokens.Spacing.sm)
+            VStack(spacing: 0) {
+                EQPanelView(
+                    settings: $localEQSettings,
+                    userPresets: userPresets,
+                    onPresetSelected: { preset in
+                        localEQSettings = preset.settings
+                        onEQChange(preset.settings)
+                    },
+                    onUserPresetSelected: { userPreset in
+                        localEQSettings = userPreset.settings
+                        onUserPresetSelected(userPreset)
+                    },
+                    onSettingsChanged: { settings in
+                        onEQChange(settings)
+                    },
+                    onSavePreset: onSavePreset,
+                    onDeleteUserPreset: onDeleteUserPreset,
+                    onRenameUserPreset: onRenameUserPreset
+                )
+                .padding(.top, DesignTokens.Spacing.sm)
+                if let onEffectsChange {
+                    EffectChainView(
+                        slots: effectSlots,
+                        onChange: onEffectsChange,
+                        onEdit: onEditEffect,
+                        onRemove: onRemoveEffect
+                    )
+                }
+            }
         }
         .onChange(of: eqSettings) { _, newValue in
             // Sync from parent when external EQ settings change
