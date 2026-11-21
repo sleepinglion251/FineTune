@@ -146,6 +146,10 @@ final class SettingsManager {
         // Per-output-device 10-band EQ (applied to every app routed to that device)
         var deviceEQSettings: [String: EQSettings] = [:]  // deviceUID → EQ settings
 
+        // Audio Unit effect chains (run after EQ, before the limiter)
+        var appEffectChains: [String: [AudioEffectSlot]] = [:]     // app identifier → chain
+        var deviceEffectChains: [String: [AudioEffectSlot]] = [:]  // deviceUID → chain
+
         // Per-device AutoEQ headphone correction
         var deviceAutoEQ: [String: AutoEQSelection] = [:]  // deviceUID → selection
         var favoriteAutoEQProfiles: Set<String> = []  // profile IDs
@@ -198,6 +202,9 @@ final class SettingsManager {
             hiddenOutputDeviceUIDs = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenOutputDeviceUIDs) ?? []
             hiddenInputDeviceUIDs = try c.decodeIfPresent(Set<String>.self, forKey: .hiddenInputDeviceUIDs) ?? []
             deviceEQSettings = (try? c.decodeIfPresent([String: EQSettings].self, forKey: .deviceEQSettings)) ?? [:]
+            // A malformed effects block must not take down the rest of the user's settings.
+            appEffectChains = (try? c.decodeIfPresent([String: [AudioEffectSlot]].self, forKey: .appEffectChains)) ?? [:]
+            deviceEffectChains = (try? c.decodeIfPresent([String: [AudioEffectSlot]].self, forKey: .deviceEffectChains)) ?? [:]
             deviceAutoEQ = try c.decodeIfPresent([String: AutoEQSelection].self, forKey: .deviceAutoEQ) ?? [:]
             favoriteAutoEQProfiles = try c.decodeIfPresent(Set<String>.self, forKey: .favoriteAutoEQProfiles) ?? []
             autoEQPreampEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoEQPreampEnabled) ?? true
@@ -295,6 +302,23 @@ final class SettingsManager {
         scheduleSave()
     }
 
+    // MARK: - Effect Chains
+
+    func getEffectChain(for owner: EffectChainOwner) -> [AudioEffectSlot] {
+        switch owner {
+        case .app(let identifier): return settings.appEffectChains[identifier] ?? []
+        case .device(let uid): return settings.deviceEffectChains[uid] ?? []
+        }
+    }
+
+    func setEffectChain(_ slots: [AudioEffectSlot], for owner: EffectChainOwner) {
+        switch owner {
+        case .app(let identifier): settings.appEffectChains[identifier] = slots.isEmpty ? nil : slots
+        case .device(let uid): settings.deviceEffectChains[uid] = slots.isEmpty ? nil : slots
+        }
+        scheduleSave()
+    }
+
     // MARK: - Device Selection Mode
 
     func getDeviceSelectionMode(for identifier: String) -> DeviceSelectionMode? {
@@ -375,6 +399,7 @@ final class SettingsManager {
         settings.appMutes.removeValue(forKey: identifier)
         settings.appDeviceRouting.removeValue(forKey: identifier)
         settings.appEQSettings.removeValue(forKey: identifier)
+        settings.appEffectChains.removeValue(forKey: identifier)
         settings.appDeviceSelectionMode.removeValue(forKey: identifier)
         settings.appSelectedDeviceUIDs.removeValue(forKey: identifier)
         scheduleSave()
@@ -883,6 +908,9 @@ final class SettingsManager {
         settings.hiddenInputDeviceUIDs.removeAll()
         settings.autoEQPreampEnabled = true
         settings.deviceAutoEQ.removeAll()
+        settings.deviceEQSettings.removeAll()
+        settings.appEffectChains.removeAll()
+        settings.deviceEffectChains.removeAll()
         settings.favoriteAutoEQProfiles.removeAll()
         settings.appDeviceSelectionMode.removeAll()
         settings.appSelectedDeviceUIDs.removeAll()

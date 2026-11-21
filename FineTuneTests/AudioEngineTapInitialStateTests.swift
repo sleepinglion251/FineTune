@@ -19,6 +19,7 @@ final class RecordingProcessTapController: ProcessTapControlling {
         case activate(TapInitialStateSnapshot)
         case updateEQSettings(EQSettings)
         case updateDeviceEQSettings(EQSettings)
+        case updateEffectChain(stage: EffectChainStage, slotIDs: [UUID])
         case updateAutoEQProfile(profileID: String?)
         case setAutoEQPreampEnabled(Bool)
         case updateLoudnessCompensation(volume: Float, enabled: Bool)
@@ -31,6 +32,8 @@ final class RecordingProcessTapController: ProcessTapControlling {
     struct TapInitialStateSnapshot: Equatable {
         var eqSettings: EQSettings
         var deviceEQSettings: EQSettings
+        var appEffectIDs: [UUID]
+        var deviceEffectIDs: [UUID]
         var autoEQProfileID: String?
         var autoEQPreampEnabled: Bool
         var loudnessVolume: Float
@@ -41,6 +44,8 @@ final class RecordingProcessTapController: ProcessTapControlling {
         init(_ s: TapInitialState) {
             self.eqSettings = s.eqSettings
             self.deviceEQSettings = s.deviceEQSettings
+            self.appEffectIDs = s.appEffects.map(\.id)
+            self.deviceEffectIDs = s.deviceEffects.map(\.id)
             self.autoEQProfileID = s.autoEQProfile?.id
             self.autoEQPreampEnabled = s.autoEQPreampEnabled
             self.loudnessVolume = s.loudnessVolume
@@ -81,6 +86,10 @@ final class RecordingProcessTapController: ProcessTapControlling {
 
     func updateDeviceEQSettings(_ settings: EQSettings) {
         events.append(.updateDeviceEQSettings(settings))
+    }
+
+    func updateEffectChain(_ slots: [AudioEffectSlot], stage: EffectChainStage) {
+        events.append(.updateEffectChain(stage: stage, slotIDs: slots.map(\.id)))
     }
 
     func updateAutoEQProfile(_ profile: AutoEQProfile?) {
@@ -394,7 +403,7 @@ struct AudioEngineTapInitialStateTests {
 
         for event in tap.events.prefix(activateIndex) {
             switch event {
-            case .updateEQSettings, .updateDeviceEQSettings, .updateAutoEQProfile, .setAutoEQPreampEnabled,
+            case .updateEQSettings, .updateDeviceEQSettings, .updateEffectChain, .updateAutoEQProfile, .setAutoEQPreampEnabled,
                  .updateLoudnessCompensation, .updateLoudnessEqualization:
                 Issue.record("Pre-activate mutation breaks the apply-initial-state contract: \(event)")
             case .activate, .invalidate:
@@ -567,7 +576,9 @@ struct AudioEngineDeviceEQTests {
 
         fix.engine.setDeviceEQSettings(curve, for: "some-other-device")
 
-        #expect(lastDeviceEQ(tap) == nil)
+        // Routing may push this device's own (flat) EQ asynchronously; only the other
+        // device's curve must never arrive.
+        #expect(lastDeviceEQ(tap) != curve)
     }
 
     @Test("a tap fanned out to several devices gets a flat device EQ")
@@ -592,5 +603,75 @@ struct AudioEngineDeviceEQTests {
         fix.engine.setDeviceEQSettings(curve, for: fix.device.uid)
         #expect(lastDeviceEQ(multiTap) == .flat)
         _ = tap
+    }
+}
+
+// MARK: - Effect chains
+
+@Suite("AudioEngine — Audio Unit effect chains")
+@MainActor
+struct AudioEngineEffectChainTests {
+    private let delay = AudioEffectSlot(
+        component: AudioEffectComponent(type: kAudioUnitType_Effect, subType: kAudioUnitSubType_Delay, manufacturer: kAudioUnitManufacturer_Apple),
+        name: "AUDelay"
+    )
+
+    private func lastChain(_ tap: RecordingProcessTapController, stage: EffectChainStage) -> [UUID]? {
+        for event in tap.events.reversed() {
+            if case let .updateEffectChain(eventStage, ids) = event, eventStage == stage { return ids }
+        }
+        return nil
+    }
+
+    @Test("saved app and device chains land in TapInitialState")
+    func initialStateCarriesChains() throws {
+        let fix = makeFixture()
+        let deviceSlot = AudioEffectSlot(component: delay.component, name: "Device delay")
+        fix.settings.setEffectChain([delay], for: .app(identifier: fix.app.persistenceIdentifier))
+        fix.settings.setEffectChain([deviceSlot], for: .device(uid: fix.device.uid))
+
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+
+        let snap = try #require(capturedInitial(fix))
+        #expect(snap.appEffectIDs == [delay.id])
+        #expect(snap.deviceEffectIDs == [deviceSlot.id])
+    }
+
+    @Test("an app chain change persists and reaches that app's tap")
+    func appChainPushed() throws {
+        let fix = makeFixture()
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+        let tap = try #require(fix.lastTap())
+
+        fix.engine.setEffectChain([delay], for: .app(identifier: fix.app.persistenceIdentifier))
+
+        #expect(lastChain(tap, stage: .app) == [delay.id])
+        #expect(fix.engine.getEffectChain(for: .app(identifier: fix.app.persistenceIdentifier)).map(\.id) == [delay.id])
+    }
+
+    @Test("a device chain change reaches taps on that device only")
+    func deviceChainPushed() throws {
+        let fix = makeFixture()
+        fix.engine.setDevice(for: fix.app, deviceUID: fix.device.uid)
+        let tap = try #require(fix.lastTap())
+
+        fix.engine.setEffectChain([delay], for: .device(uid: "another-device"))
+        // Routing may push this device's own (empty) chain; the other device's must not arrive.
+        #expect(lastChain(tap, stage: .device) != [delay.id])
+
+        fix.engine.setEffectChain([delay], for: .device(uid: fix.device.uid))
+        #expect(lastChain(tap, stage: .device) == [delay.id])
+    }
+
+    @Test("saving an effect's state updates the stored slot")
+    func saveStatePersists() throws {
+        let fix = makeFixture()
+        let owner = EffectChainOwner.app(identifier: fix.app.persistenceIdentifier)
+        fix.engine.setEffectChain([delay], for: owner)
+        let state = Data([1, 2, 3])
+
+        fix.engine.saveEffectState(state, owner: owner, slotID: delay.id, applyToRunning: false)
+
+        #expect(fix.engine.getEffectChain(for: owner).first?.state == state)
     }
 }

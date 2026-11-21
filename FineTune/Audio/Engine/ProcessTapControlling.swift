@@ -1,3 +1,6 @@
+import AudioToolbox
+import Foundation
+
 /// Abstraction over process tap controllers for testability.
 ///
 /// **Threading:** The protocol surface is `@MainActor` — AudioEngine and tests
@@ -22,6 +25,11 @@ protocol ProcessTapControlling: AnyObject, Sendable {
     func updateEQSettings(_ settings: EQSettings)
     func updateAutoEQProfile(_ profile: AutoEQProfile?)
     func updateDeviceEQSettings(_ settings: EQSettings)
+    func updateEffectChain(_ slots: [AudioEffectSlot], stage: EffectChainStage)
+    func setEffectParameter(stage: EffectChainStage, slotID: UUID, id: AudioUnitParameterID, scope: AudioUnitScope, element: AudioUnitElement, value: AudioUnitParameterValue)
+    func applyEffectState(stage: EffectChainStage, slotID: UUID, state: Data)
+    /// The running instance of an effect in the primary chain, for editors to attach to.
+    func liveEffect(stage: EffectChainStage, slotID: UUID) -> HostedEffect?
     func setAutoEQPreampEnabled(_ enabled: Bool)
     func updateLoudnessCompensation(volume: Float, enabled: Bool)
     func updateLoudnessEqualization(_ settings: LoudnessEqualizerSettings)
@@ -72,8 +80,12 @@ extension ProcessTapControlling {
         // Default no-op for mocks that don't override
     }
 
-    // Default for mocks that don't model per-device EQ.
+    // Defaults for mocks that don't model per-device EQ or effects.
     func updateDeviceEQSettings(_ settings: EQSettings) {}
+    func updateEffectChain(_ slots: [AudioEffectSlot], stage: EffectChainStage) {}
+    func setEffectParameter(stage: EffectChainStage, slotID: UUID, id: AudioUnitParameterID, scope: AudioUnitScope, element: AudioUnitElement, value: AudioUnitParameterValue) {}
+    func applyEffectState(stage: EffectChainStage, slotID: UUID, state: Data) {}
+    func liveEffect(stage: EffectChainStage, slotID: UUID) -> HostedEffect? { nil }
 
     // Defaults for mocks that don't model suspension.
     var isSuspended: Bool { false }

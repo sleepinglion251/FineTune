@@ -34,6 +34,10 @@ struct AppRowWithLevelPolling: View {
     let isEQExpanded: Bool
     let onEQToggle: () -> Void
     let isFocused: Bool
+    let effectSlots: [AudioEffectSlot]
+    let onEffectsChange: (([AudioEffectSlot]) -> Void)?
+    let onEditEffect: (AudioEffectSlot) -> Void
+    let onRemoveEffect: (AudioEffectSlot) -> Void
 
     @State private var displayLevel: Float = 0
     @State private var levelTimer: Timer?
@@ -69,8 +73,16 @@ struct AppRowWithLevelPolling: View {
         onRenameUserPreset: @escaping (UUID, String) -> Void = { _, _ in },
         isEQExpanded: Bool = false,
         onEQToggle: @escaping () -> Void = {},
-        isFocused: Bool = false
+        isFocused: Bool = false,
+        effectSlots: [AudioEffectSlot] = [],
+        onEffectsChange: (([AudioEffectSlot]) -> Void)? = nil,
+        onEditEffect: @escaping (AudioEffectSlot) -> Void = { _ in },
+        onRemoveEffect: @escaping (AudioEffectSlot) -> Void = { _ in }
     ) {
+        self.effectSlots = effectSlots
+        self.onEffectsChange = onEffectsChange
+        self.onEditEffect = onEditEffect
+        self.onRemoveEffect = onRemoveEffect
         self.app = app
         self.volume = volume
         self.isMuted = isMuted
@@ -135,7 +147,11 @@ struct AppRowWithLevelPolling: View {
             onRenameUserPreset: onRenameUserPreset,
             isEQExpanded: isEQExpanded,
             onEQToggle: onEQToggle,
-            isFocused: isFocused
+            isFocused: isFocused,
+            effectSlots: effectSlots,
+            onEffectsChange: onEffectsChange,
+            onEditEffect: onEditEffect,
+            onRemoveEffect: onRemoveEffect
         )
         .onAppear {
             if isPopupVisible {
