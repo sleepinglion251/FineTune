@@ -231,11 +231,11 @@ struct MIDIControlRegistryTests {
         input.send(.controlChange(channel: 0, controller: 7, value: 127))
         #expect(system.volumeWrites.count == 1)
 
-        // The trailing write fires after the throttle interval; on a loaded CI runner the
-        // main actor can be busy for a while, so poll rather than sleep a fixed time.
-        let clock = ContinuousClock()
-        let deadline = clock.now + .seconds(5)
-        while system.volumeWrites.count < 2, clock.now < deadline {
+        // The trailing write fires after the throttle interval. On a loaded CI runner other
+        // suites can hold the main actor for seconds, so poll by iteration count, not a
+        // wall-clock deadline: after a stall, the overdue flush (queued earlier) runs before
+        // the next poll, whereas a deadline check could give up first.
+        for _ in 0..<250 where system.volumeWrites.count < 2 {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(system.volumeWrites.count == 2)
