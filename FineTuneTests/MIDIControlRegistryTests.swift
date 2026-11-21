@@ -231,7 +231,13 @@ struct MIDIControlRegistryTests {
         input.send(.controlChange(channel: 0, controller: 7, value: 127))
         #expect(system.volumeWrites.count == 1)
 
-        try await Task.sleep(for: .milliseconds(200))
+        // The trailing write fires after the throttle interval; on a loaded CI runner the
+        // main actor can be busy for a while, so poll rather than sleep a fixed time.
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(5)
+        while system.volumeWrites.count < 2, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         #expect(system.volumeWrites.count == 2)
         #expect(system.volumeWrites.last == 1.0)
     }

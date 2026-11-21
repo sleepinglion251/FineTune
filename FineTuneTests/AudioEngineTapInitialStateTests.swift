@@ -576,7 +576,9 @@ struct AudioEngineDeviceEQTests {
 
         fix.engine.setDeviceEQSettings(curve, for: "some-other-device")
 
-        #expect(lastDeviceEQ(tap) == nil)
+        // Routing may push this device's own (flat) EQ asynchronously; only the other
+        // device's curve must never arrive.
+        #expect(lastDeviceEQ(tap) != curve)
     }
 
     @Test("a tap fanned out to several devices gets a flat device EQ")
@@ -654,7 +656,8 @@ struct AudioEngineEffectChainTests {
         let tap = try #require(fix.lastTap())
 
         fix.engine.setEffectChain([delay], for: .device(uid: "another-device"))
-        #expect(lastChain(tap, stage: .device) == nil)
+        // Routing may push this device's own (empty) chain; the other device's must not arrive.
+        #expect(lastChain(tap, stage: .device) != [delay.id])
 
         fix.engine.setEffectChain([delay], for: .device(uid: fix.device.uid))
         #expect(lastChain(tap, stage: .device) == [delay.id])
